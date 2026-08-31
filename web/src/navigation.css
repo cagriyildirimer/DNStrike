@@ -1,0 +1,4 @@
+a.nav{text-decoration:none}
+.testStatus{display:inline-flex;padding:4px 8px;border-radius:5px;font:9px DM Mono,monospace;letter-spacing:.5px;border:1px solid #30443e;background:#17231f;color:#aab9b4}
+.status-running{color:#64f6b2;border-color:#286047;background:#10281f}.status-completed{color:#8ec7ff;border-color:#294b68;background:#102232}.status-failed{color:#f3a3a3;border-color:#653838;background:#2b1717}.status-cancelled{color:#d3b48b;border-color:#5d4930;background:#251e14}
+@media(max-width:800px){.sidebar nav{display:flex;overflow-x:auto;margin-top:12px;padding-bottom:4px}.sidebar .nav{min-width:max-content}.sideBottom{display:none}}
