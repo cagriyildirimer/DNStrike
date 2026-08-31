@@ -1,0 +1,10 @@
+/data/*.db
+/reports/*
+!/reports/.gitkeep
+/web/node_modules/
+/web/dist/
+*.log
+.env
+*.tsbuildinfo
+/web/vite.config.js
+/web/vite.config.d.ts

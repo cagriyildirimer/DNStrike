@@ -1,0 +1,12 @@
+services:
+  dnstrike:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DNSTRIKE_ADDR: 0.0.0.0:8080
+      DNSTRIKE_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    restart: unless-stopped
