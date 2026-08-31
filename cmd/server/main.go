@@ -34,6 +34,10 @@ func main() {
 		logger.Error("data directory", "error", err)
 		os.Exit(1)
 	}
+	if err := verifyWritableDirectory(dataDir); err != nil {
+		logger.Error("data directory is not writable", "path", dataDir, "error", err)
+		os.Exit(1)
+	}
 	store, err := sqlite.Open(filepath.Join(dataDir, "dnstrike.db"))
 	if err != nil {
 		logger.Error("database startup", "error", err)
@@ -66,4 +70,17 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func verifyWritableDirectory(path string) error {
+	file, err := os.CreateTemp(path, ".dnstrike-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Remove(name)
 }

@@ -48,6 +48,19 @@ docker compose up --build
 
 The compose port is deliberately bound to localhost. SQLite data and future reports use `./data` and `./reports` volumes.
 
+Compose runs the container with host UID/GID `1000:1000` by default so the bind-mounted directories remain writable. On a host using different IDs, start it with:
+
+```bash
+DNSTRIKE_UID=$(id -u) DNSTRIKE_GID=$(id -g) docker compose up --build
+```
+
+If an older container reports SQLite error 14 (`unable to open database file`), rebuild it after this UID/GID change:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
 ## API
 
 | Method | Path | Purpose |

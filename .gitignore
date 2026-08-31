@@ -1,4 +1,5 @@
 /data/*.db
+/data/*.db-*
 /reports/*
 !/reports/.gitkeep
 /web/node_modules/
