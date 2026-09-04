@@ -76,7 +76,22 @@ export function generatePdfReport(test: TestRun) {
   let alertTitle = 'SECURE CONFIGURATION';
   let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
 
-  if (test.scenario === 'subdomain-takeover') {
+  if (test.scenario === 'rrl-threshold') {
+    const rateLimitActive = Boolean(test.result?.rate_limit_active);
+    const slipActive = Boolean(test.result?.slip_fallback_active);
+    const thresholdQPS = Number(test.result?.detected_threshold_qps ?? 0);
+    if (!rateLimitActive) {
+      alertBg = [255, 251, 235];
+      alertBorder = [245, 158, 11];
+      alertTitleColor = [180, 83, 9];
+      alertTextColor = [146, 64, 14];
+      alertTitle = 'WARNING (NO RRL RATE LIMITING ENFORCED)';
+      alertText = 'The DNS server processed peak 500 QPS UDP bursts without enforcing Response Rate Limiting (RRL). The server is at risk of reflector DDoS participation.';
+    } else {
+      alertTitle = slipActive ? 'EXCELLENT RRL & SLIP POSTURE' : 'GOOD RRL POSTURE (STRICT DROP)';
+      alertText = `Response Rate Limiting triggered at ${thresholdQPS} QPS. ${slipActive ? 'SLIP TCP Fallback (TC=1) is active to allow legitimate resolvers to fallback to TCP.' : 'Strict UDP packet drop is active.'}`;
+    }
+  } else if (test.scenario === 'subdomain-takeover') {
     const vulnCount = Number(test.result?.vulnerable_count ?? 0);
     if (vulnCount > 0) {
       alertBg = [254, 242, 242];

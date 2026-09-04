@@ -357,7 +357,68 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && test.scenario !== 'subdomain-takeover' && (
+          {test.result && test.scenario === 'rrl-threshold' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Zap size={16} style={{ color: 'var(--accent-amber)' }} /> Response Rate Limiting (RRL) & SLIP Threshold Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>DETECTED THRESHOLD</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {(test.result.detected_threshold_qps as number) > 0 ? `${String(test.result.detected_threshold_qps)} QPS` : 'N/A (>500)'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SLIP TCP FALLBACK</span>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: test.result.slip_fallback_active ? 'var(--accent-green)' : 'var(--accent-amber)' }}>
+                    {test.result.slip_fallback_active ? 'ACTIVE (TC=1 SLIP)' : 'INACTIVE (STRICT DROP)'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>RRL POSTURE</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: test.result.rate_limit_active ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+
+              {Boolean(test.result.stage_results) && (
+                <div className="table-responsive" style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', marginBottom: '2.5rem' }}>
+                  <table style={{ margin: 0 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: '0.75rem 1rem' }}>Test Stage</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Target QPS</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Responded</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Dropped</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Truncated (TC=1)</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Stage Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(test.result.stage_results as Array<Record<string, unknown>>).map((stg, idx) => (
+                        <tr key={idx}>
+                          <td style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>{String(stg.stage_name)}</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(stg.target_qps)} QPS</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(stg.responded_pct)}%</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(stg.dropped_pct)}%</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(stg.truncated_pct)}%</td>
+                          <td style={{ padding: '0.75rem 1rem' }}>
+                            <span className={`pill ${String(stg.stage_result_text).includes('ACTIVE') ? 'pill-completed' : 'pill-pending'}`}>
+                              {String(stg.stage_result_text)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && test.scenario !== 'subdomain-takeover' && test.scenario !== 'rrl-threshold' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results

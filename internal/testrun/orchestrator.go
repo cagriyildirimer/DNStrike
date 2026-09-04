@@ -151,6 +151,8 @@ func (o *Orchestrator) executeTest(id int64) {
 			score, result, execErr = o.runDNSFuzzingScenario(ctx, test, target, meta, config)
 		} else if meta.ID == "subdomain-takeover" {
 			score, result, execErr = o.runSubdomainTakeoverScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "rrl-threshold" {
+			score, result, execErr = o.runRRLThresholdScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
@@ -1290,6 +1292,147 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 		"vulnerable_count":   vulnerableCount,
 		"status_summary":     statusText,
 		"scan_results":       results,
+	}
+
+	return score, result, nil
+}
+
+// Response Rate Limiting (RRL) & SLIP Threshold Test Logic
+func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Response Rate Limiting (RRL) & SLIP Threshold Test for domain %s..."}`, domain)))
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	type stageConfig struct {
+		Name string
+		QPS  int
+	}
+
+	stages := []stageConfig{
+		{Name: "Stage 1 (Baseline - 25 QPS)", QPS: 25},
+		{Name: "Stage 2 (Moderate - 100 QPS)", QPS: 100},
+		{Name: "Stage 3 (High - 250 QPS)", QPS: 250},
+		{Name: "Stage 4 (Peak Burst - 500 QPS)", QPS: 500},
+	}
+
+	type stageResult struct {
+		StageName       string  `json:"stage_name"`
+		TargetQPS       int     `json:"target_qps"`
+		RespondedCount  int     `json:"responded_count"`
+		DroppedCount    int     `json:"dropped_count"`
+		TruncatedCount  int     `json:"truncated_count"`
+		RespondedPct    float64 `json:"responded_pct"`
+		DroppedPct      float64 `json:"dropped_pct"`
+		TruncatedPct    float64 `json:"truncated_pct"`
+		StageResultText string  `json:"stage_result_text"`
+	}
+
+	var results []stageResult
+	client := &dns.Client{Net: "udp", Timeout: 600 * time.Millisecond}
+
+	detectedThresholdQPS := 0
+	slipDetected := false
+	rateLimitActive := false
+
+	for idx, stg := range stages {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/4] Testing %s: firing %d UDP burst queries in 1 second..."}`, idx+1, stg.Name, stg.QPS)))
+
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+		m.RecursionDesired = true
+
+		interval := time.Second / time.Duration(stg.QPS)
+		responded := 0
+		dropped := 0
+		truncated := 0
+
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+
+		for i := 0; i < stg.QPS; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resp, _, err := client.ExchangeContext(ctx, m, address)
+				mu.Lock()
+				if err != nil {
+					dropped++
+				} else if resp != nil {
+					responded++
+					if resp.Truncated {
+						truncated++
+					}
+				}
+				mu.Unlock()
+			}()
+			time.Sleep(interval)
+		}
+		wg.Wait()
+
+		respPct := float64(int((float64(responded)/float64(stg.QPS))*10000)) / 100
+		dropPct := float64(int((float64(dropped)/float64(stg.QPS))*10000)) / 100
+		truncPct := float64(int((float64(truncated)/float64(stg.QPS))*10000)) / 100
+
+		stgStatus := "NORMAL (UNLIMITED)"
+		if dropPct > 20.0 || truncPct > 0.0 {
+			rateLimitActive = true
+			if detectedThresholdQPS == 0 {
+				detectedThresholdQPS = stg.QPS
+			}
+			if truncPct > 0.0 {
+				slipDetected = true
+				stgStatus = "RRL ACTIVE (SLIP TCP FALLBACK)"
+			} else {
+				stgStatus = "RRL ACTIVE (STRICT DROP)"
+			}
+			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] Rate limit triggered at %d QPS! Dropped: %.1f%%, Truncated (TC=1): %.1f%%"}`, stg.QPS, dropPct, truncPct)))
+		} else {
+			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"- [%s] Responded: %.1f%%, Dropped: %.1f%%"}`, stg.Name, respPct, dropPct)))
+		}
+
+		results = append(results, stageResult{
+			StageName:       stg.Name,
+			TargetQPS:       stg.QPS,
+			RespondedCount:  responded,
+			DroppedCount:    dropped,
+			TruncatedCount:  truncated,
+			RespondedPct:    respPct,
+			DroppedPct:      dropPct,
+			TruncatedPct:    truncPct,
+			StageResultText: stgStatus,
+		})
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	score := 100
+	statusText := "SECURE (RRL ACTIVE WITH SLIP TCP FALLBACK)"
+
+	if !rateLimitActive {
+		score = 50
+		statusText = "WARNING (NO RRL RATE LIMITING DETECTED AT 500 QPS)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Target responded to peak 500 QPS burst without enforcing Response Rate Limiting (RRL)."}`))
+	} else if slipDetected {
+		score = 100
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[EXCELLENT] RRL threshold identified at %d QPS with active SLIP TCP Fallback (TC=1)."}`, detectedThresholdQPS)))
+	} else {
+		score = 85
+		statusText = "GOOD (RRL STRICT DROP ACTIVE)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[GOOD] RRL threshold identified at %d QPS (Strict packet drop)."}`, detectedThresholdQPS)))
+	}
+
+	result := map[string]any{
+		"domain":                 domain,
+		"rate_limit_active":      rateLimitActive,
+		"slip_fallback_active":   slipDetected,
+		"detected_threshold_qps": detectedThresholdQPS,
+		"status_summary":         statusText,
+		"stage_results":          results,
 	}
 
 	return score, result, nil

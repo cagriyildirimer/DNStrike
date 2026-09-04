@@ -49,6 +49,15 @@ DNStrike offers specialized attack simulations, resilience benchmarks, and secur
 
 ---
 
+### 5. ⚡ Response Rate Limiting (RRL) & SLIP Threshold Test (`rrl-threshold`)
+* **Category / Kategori:** `audit`
+* **Risk Level:** `HIGH`
+* **Config Parameters:** `domain` (Default: `example.com`), `max_burst_qps` (Default: 500)
+* **Description (EN):** Ramps UDP query bursts in 4 stepped rates (25, 100, 250, 500 QPS) to identify the exact RRL activation threshold, measure dropped vs responded packet ratios, and evaluate `TC=1` SLIP TCP Fallback behavior.
+* **Açıklama (TR):** Hedef DNS sunucusuna 4 aşamalı artan UDP sorgu patlamaları (25, 100, 250, 500 QPS) göndererek Response Rate Limiting (RRL) eşik değerini (Threshold QPS), paket düşürme oranını ve `TC=1` SLIP TCP Fallback koruma profilini tespit eder.
+
+---
+
 ### 2. 🚀 DNS Amplification & RRL Audit (`amplification-audit`)
 * **Category / Kategori:** `audit`
 * **Risk Level:** `MEDIUM`
