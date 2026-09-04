@@ -22,6 +22,15 @@ DNStrike offers specialized attack simulations, resilience benchmarks, and secur
 
 ---
 
+### 2. 🔓 AXFR Zone Transfer Leak Audit (`zone-transfer-audit`)
+* **Category / Kategori:** `audit`
+* **Risk Level:** `LOW`
+* **Config Parameters:** `domain` (Default: `example.com`)
+* **Description (EN):** Probes the DNS server over TCP 53 to check if unauthorized clients can execute an AXFR/IXFR full zone transfer and siphon complete domain database records (internal IPs, subdomains, MX, TXT, NS).
+* **Açıklama (TR):** Hedef DNS sunucusuna TCP Port 53 üzerinden yetkisiz `AXFR` (Full Zone Transfer) isteği göndererek alan adına ait tüm veritabanı kayıtlarının sızdırılıp sızdırılamadığını denetler.
+
+---
+
 ### 2. 🚀 DNS Amplification & RRL Audit (`amplification-audit`)
 * **Category / Kategori:** `audit`
 * **Risk Level:** `MEDIUM`

@@ -76,7 +76,20 @@ export function generatePdfReport(test: TestRun) {
   let alertTitle = 'SECURE CONFIGURATION';
   let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
 
-  if (test.scenario === 'tcp-slowloris') {
+  if (test.scenario === 'zone-transfer-audit') {
+    const leaked = Number(test.result?.total_leaked_records ?? 0);
+    if (leaked > 0) {
+      alertBg = [254, 242, 242];
+      alertBorder = [239, 68, 68];
+      alertTitleColor = [185, 28, 28];
+      alertTextColor = [127, 29, 29];
+      alertTitle = 'CRITICAL ZONE TRANSFER LEAK DETECTED';
+      alertText = `The DNS server permitted an unauthorized AXFR full zone transfer and siphoned ${leaked} domain records. Disable AXFR globally or restrict transfers exclusively to secondary nameserver IPs.`;
+    } else {
+      alertTitle = 'SECURE ZONE TRANSFER POSTURE';
+      alertText = 'The DNS server correctly refused unauthorized AXFR zone transfer requests. Domain record database remains protected.';
+    }
+  } else if (test.scenario === 'tcp-slowloris') {
     if (test.result?.legitimate_tcp_served === false) {
       alertBg = [254, 242, 242];
       alertBorder = [239, 68, 68];

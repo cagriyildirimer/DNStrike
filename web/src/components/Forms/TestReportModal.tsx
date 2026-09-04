@@ -190,7 +190,60 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && (
+          {test.result && test.scenario === 'zone-transfer-audit' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={16} style={{ color: (test.result.total_leaked_records as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }} /> AXFR Zone Transfer Leak Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>LEAKED RECORDS</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: (test.result.total_leaked_records as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.total_leaked_records)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>TARGET DOMAIN</span>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.domain)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SECURITY POSTURE</span>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 700, color: (test.result.total_leaked_records as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+
+              {Boolean(test.result.sample_records) && (test.result.sample_records as Array<unknown>).length > 0 && (
+                <div className="table-responsive" style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', marginBottom: '2.5rem' }}>
+                  <table style={{ margin: 0 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: '0.75rem 1rem' }}>Record Name</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Type</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Siphoned Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(test.result.sample_records as Array<Record<string, unknown>>).map((rec, idx) => (
+                        <tr key={idx}>
+                          <td style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>{String(rec.name)}</td>
+                          <td style={{ padding: '0.75rem 1rem' }}>
+                            <span className="pill pill-pending">{String(rec.type)}</span>
+                          </td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace', fontSize: '0.85rem' }}>{String(rec.value)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results

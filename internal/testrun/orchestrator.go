@@ -145,6 +145,8 @@ func (o *Orchestrator) executeTest(id int64) {
 	case "audit":
 		if meta.ID == "amplification-audit" {
 			score, result, execErr = o.runAmplificationAuditScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "zone-transfer-audit" {
+			score, result, execErr = o.runZoneTransferAuditScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
@@ -942,6 +944,94 @@ func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.
 		"legitimate_tcp_served":  legitimateServed,
 		"probe_latency_ms":       probeRes.LatencyMS,
 		"status_summary":         statusText,
+	}
+
+	return score, result, nil
+}
+
+// AXFR Zone Transfer Leak Audit Logic
+func (o *Orchestrator) runZoneTransferAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting AXFR Zone Transfer Leak Audit for domain: %s..."}`, domain)))
+
+	if !target.TCPEnabled {
+		return 0, nil, fmt.Errorf("target TCP port 53 is disabled in target configuration (AXFR requires TCP)")
+	}
+
+	type leakedRecord struct {
+		Name  string `json:"name"`
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	transfer := new(dns.Transfer)
+	transfer.ReadTimeout = 5 * time.Second
+
+	m := new(dns.Msg)
+	m.SetAxfr(dns.Fqdn(domain))
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/2] Connecting to %s via TCP 53 and requesting AXFR for %s..."}`, address, domain)))
+
+	ch, err := transfer.In(m, address)
+
+	var records []leakedRecord
+	recordCounts := make(map[string]int)
+	totalLeaked := 0
+	transferFailed := false
+	errMessage := ""
+
+	if err != nil {
+		transferFailed = true
+		errMessage = err.Error()
+	} else {
+		for env := range ch {
+			if env.Error != nil {
+				transferFailed = true
+				errMessage = env.Error.Error()
+				break
+			}
+			for _, rr := range env.RR {
+				totalLeaked++
+				header := rr.Header()
+				recType := dns.TypeToString[header.Rrtype]
+				recordCounts[recType]++
+
+				if len(records) < 50 {
+					records = append(records, leakedRecord{
+						Name:  header.Name,
+						Type:  recType,
+						Value: strings.TrimSpace(strings.TrimPrefix(rr.String(), header.String())),
+					})
+				}
+			}
+		}
+	}
+
+	score := 100
+	statusText := "SECURE (TRANSFER REFUSED)"
+
+	if totalLeaked > 0 {
+		score = 0
+		statusText = "CRITICAL VULNERABILITY (ZONE LEAK DETECTED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] AXFR Transfer SUCCESSFUL! Leaked %d total zone records for domain %s!"}`, totalLeaked, domain)))
+	} else if transferFailed {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] AXFR Transfer refused/failed by target (%s). No records leaked."}`, errMessage)))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR query returned 0 records. Domain data is protected."}`))
+	}
+
+	result := map[string]any{
+		"domain":               domain,
+		"total_leaked_records": totalLeaked,
+		"status_summary":       statusText,
+		"record_counts":        recordCounts,
+		"sample_records":       records,
 	}
 
 	return score, result, nil
