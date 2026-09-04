@@ -104,7 +104,65 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </table>
           </div>
 
-          {test.result && Object.keys(test.result).length > 0 && (
+          {test.result && Boolean(test.result.amplification_results) && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Zap size={16} style={{ color: 'var(--accent-amber)' }} /> Amplification & RRL Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>MAX AMPLIFICATION</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: (test.result.max_amplification_factor as number) > 20 ? 'var(--accent-red)' : (test.result.max_amplification_factor as number) > 10 ? 'var(--accent-amber)' : 'var(--accent-green)' }}>
+                    {String(test.result.max_amplification_factor)}x
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>RRL POSTURE</span>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: test.result.rrl_active ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {String(test.result.rrl_status)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>MAX RESPONSE SIZE</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.max_response_bytes)} B
+                  </span>
+                </div>
+              </div>
+              <div className="table-responsive" style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', marginBottom: '2.5rem' }}>
+                <table style={{ margin: 0 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: '0.75rem 1rem' }}>Query Type</th>
+                      <th style={{ padding: '0.75rem 1rem' }}>Req Size</th>
+                      <th style={{ padding: '0.75rem 1rem' }}>Resp Size</th>
+                      <th style={{ padding: '0.75rem 1rem' }}>Multiplier</th>
+                      <th style={{ padding: '0.75rem 1rem' }}>RCode</th>
+                      <th style={{ padding: '0.75rem 1rem' }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(test.result.amplification_results as Array<Record<string, unknown>>).map((item, idx) => (
+                      <tr key={idx}>
+                        <td style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>{String(item.query_type)} {item.edns0 ? '(EDNS0 4K)' : ''}</td>
+                        <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(item.request_bytes)} B</td>
+                        <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace' }}>{String(item.response_bytes)} B</td>
+                        <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace', fontWeight: 700 }}>{String(item.amplification)}x</td>
+                        <td style={{ padding: '0.75rem 1rem', fontSize: '0.85rem' }}>{String(item.rcode)}</td>
+                        <td style={{ padding: '0.75rem 1rem' }}>
+                          <span className={`pill ${item.status === 'CRITICAL' ? 'pill-failed' : item.status === 'HIGH' || item.status === 'MODERATE' ? 'pill-pending' : 'pill-completed'}`}>
+                            {String(item.status)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results

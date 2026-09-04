@@ -143,7 +143,11 @@ func (o *Orchestrator) executeTest(id int64) {
 	
 	switch meta.Category {
 	case "audit":
-		score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
+		if meta.ID == "amplification-audit" {
+			score, result, execErr = o.runAmplificationAuditScenario(ctx, test, target, meta, config)
+		} else {
+			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
+		}
 	case "performance", "volume":
 		score, result, execErr = o.runPerformanceScenario(ctx, test, target, meta, config)
 	case "resolver-cache":
@@ -249,6 +253,175 @@ func (o *Orchestrator) runAuditScenario(ctx context.Context, test models.Test, t
 		score = 0
 	}
 	return score, nil, nil
+}
+
+// Amplification & RRL Audit Logic
+func (o *Orchestrator) runAmplificationAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"Starting DNS Amplification & RRL Audit..."}`))
+
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	type queryConfig struct {
+		qType string
+		edns  bool
+	}
+
+	testsToRun := []queryConfig{
+		{qType: "A", edns: false},
+		{qType: "A", edns: true},
+		{qType: "TXT", edns: true},
+		{qType: "ANY", edns: true},
+		{qType: "DNSKEY", edns: true},
+	}
+
+	type ampItem struct {
+		QueryType     string  `json:"query_type"`
+		EDNS0         bool    `json:"edns0"`
+		RequestBytes  int     `json:"request_bytes"`
+		ResponseBytes int     `json:"response_bytes"`
+		Amplification float64 `json:"amplification"`
+		RCode         string  `json:"rcode"`
+		Status        string  `json:"status"`
+	}
+
+	var results []ampItem
+	maxAmp := 0.0
+	maxRespBytes := 0
+	score := 100
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/2] Measuring query/response payload sizes and amplification factors..."}`))
+
+	client := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
+
+	for _, tc := range testsToRun {
+		m := new(dns.Msg)
+		qTypeNum := dns.TypeA
+		switch tc.qType {
+		case "TXT":
+			qTypeNum = dns.TypeTXT
+		case "ANY":
+			qTypeNum = dns.TypeANY
+		case "DNSKEY":
+			qTypeNum = dns.TypeDNSKEY
+		}
+		m.SetQuestion(dns.Fqdn(domain), qTypeNum)
+		m.RecursionDesired = true
+		if tc.edns {
+			m.SetEdns0(4096, true)
+		}
+
+		reqLen := m.Len()
+		resp, _, err := client.ExchangeContext(ctx, m, address)
+
+		respLen := 0
+		rcodeStr := "ERROR"
+		amp := 0.0
+		status := "SAFE"
+
+		if err == nil && resp != nil {
+			respLen = resp.Len()
+			rcodeStr = dns.RcodeToString[resp.Rcode]
+			if reqLen > 0 {
+				amp = float64(respLen) / float64(reqLen)
+			}
+			if amp > 20.0 {
+				status = "CRITICAL"
+			} else if amp > 10.0 {
+				status = "HIGH"
+			} else if amp > 5.0 {
+				status = "MODERATE"
+			}
+		} else if err != nil {
+			rcodeStr = "TIMEOUT/REFUSED"
+		}
+
+		if amp > maxAmp {
+			maxAmp = amp
+		}
+		if respLen > maxRespBytes {
+			maxRespBytes = respLen
+		}
+
+		results = append(results, ampItem{
+			QueryType:     tc.qType,
+			EDNS0:         tc.edns,
+			RequestBytes:  reqLen,
+			ResponseBytes: respLen,
+			Amplification: float64(int(amp*100)) / 100,
+			RCode:         rcodeStr,
+			Status:        status,
+		})
+
+		ednsLabel := "Standard"
+		if tc.edns {
+			ednsLabel = "EDNS0 4096"
+		}
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"- [%s (%s)] Req: %dB, Resp: %dB, Amplification: %.2fx, RCode: %s"}`, tc.qType, ednsLabel, reqLen, respLen, amp, rcodeStr)))
+	}
+
+	// 2. Response Rate Limiting (RRL) Burst Test
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/2] Running 50-query burst test for Response Rate Limiting (RRL)..."}`))
+
+	burstMsg := new(dns.Msg)
+	burstMsg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	burstMsg.RecursionDesired = true
+
+	fastClient := &dns.Client{Net: "udp", Timeout: 800 * time.Millisecond}
+	dropped := 0
+	truncated := 0
+
+	for i := 0; i < 50; i++ {
+		resp, _, err := fastClient.ExchangeContext(ctx, burstMsg, address)
+		if err != nil {
+			dropped++
+		} else if resp != nil && resp.Truncated {
+			truncated++
+		}
+	}
+
+	rrlActive := false
+	rrlStatus := "NO RRL DETECTED"
+
+	if dropped > 8 || truncated > 0 {
+		rrlActive = true
+		rrlStatus = "RRL ACTIVE"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] Response Rate Limiting is ACTIVE (Dropped: %d/50, Truncated: %d/50). Target restricts amplification relays."}`, dropped, truncated)))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] No Response Rate Limiting (RRL) detected! Target responded to 100%% of burst queries."}`))
+	}
+
+	if maxAmp > 20.0 {
+		score -= 40
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] High Response Amplification Factor detected (%.2fx)."}`, maxAmp)))
+	} else if maxAmp > 10.0 {
+		score -= 20
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Moderate Response Amplification Factor detected (%.2fx)."}`, maxAmp)))
+	}
+
+	if !rrlActive {
+		score -= 25
+	}
+
+	if score < 0 {
+		score = 0
+	}
+
+	result := map[string]any{
+		"domain":                   domain,
+		"max_amplification_factor": float64(int(maxAmp*100)) / 100,
+		"max_response_bytes":       maxRespBytes,
+		"rrl_active":               rrlActive,
+		"rrl_dropped_count":        dropped,
+		"rrl_status":               rrlStatus,
+		"amplification_results":    results,
+	}
+
+	return score, result, nil
 }
 
 // Performance Benchmark Logic

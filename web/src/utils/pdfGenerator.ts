@@ -178,23 +178,44 @@ export function generatePdfReport(test: TestRun) {
     doc.text('4. Execution Results', 15, currentY);
     currentY += 4;
 
-    const resultBody = Object.entries(test.result).map(([k, v]) => [
-      k.replace(/_/g, ' '),
-      typeof v === 'number' && k.includes('latency') ? `${v.toFixed(2)} ms` : String(v)
-    ]);
+    if (test.result.amplification_results && Array.isArray(test.result.amplification_results)) {
+      const ampBody = (test.result.amplification_results as Array<Record<string, unknown>>).map(item => [
+        `${String(item.query_type)} ${item.edns0 ? '(EDNS0)' : ''}`,
+        `${String(item.request_bytes)} B`,
+        `${String(item.response_bytes)} B`,
+        `${String(item.amplification)}x`,
+        String(item.rcode),
+        String(item.status)
+      ]);
 
-    autoTable(doc, {
-      startY: currentY,
-      theme: 'grid',
-      headStyles: { fillColor: [243, 244, 246], textColor: [55, 65, 81], fontStyle: 'bold' },
-      styles: { fontSize: 8, cellPadding: 2.5, textColor: [31, 41, 55] },
-      columnStyles: {
-        0: { fontStyle: 'bold', cellWidth: 60, fillColor: [249, 250, 251] },
-        1: { fontStyle: 'bold', cellWidth: 'auto' }
-      },
-      body: resultBody,
-      margin: { left: 15, right: 15 }
-    });
+      autoTable(doc, {
+        startY: currentY,
+        theme: 'grid',
+        head: [['Query Type', 'Req Size', 'Resp Size', 'Multiplier', 'RCode', 'Status']],
+        headStyles: { fillColor: [243, 244, 246], textColor: [55, 65, 81], fontStyle: 'bold' },
+        styles: { fontSize: 8, cellPadding: 2.5, textColor: [31, 41, 55] },
+        body: ampBody,
+        margin: { left: 15, right: 15 }
+      });
+    } else {
+      const resultBody = Object.entries(test.result).map(([k, v]) => [
+        k.replace(/_/g, ' '),
+        typeof v === 'number' && k.includes('latency') ? `${v.toFixed(2)} ms` : String(v)
+      ]);
+
+      autoTable(doc, {
+        startY: currentY,
+        theme: 'grid',
+        headStyles: { fillColor: [243, 244, 246], textColor: [55, 65, 81], fontStyle: 'bold' },
+        styles: { fontSize: 8, cellPadding: 2.5, textColor: [31, 41, 55] },
+        columnStyles: {
+          0: { fontStyle: 'bold', cellWidth: 60, fillColor: [249, 250, 251] },
+          1: { fontStyle: 'bold', cellWidth: 'auto' }
+        },
+        body: resultBody,
+        margin: { left: 15, right: 15 }
+      });
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
     currentY = (doc as any).lastAutoTable.finalY + 10;
