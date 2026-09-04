@@ -42,6 +42,16 @@ func (e *QueryEngine) Execute(ctx context.Context, target models.Target, query m
 		message.SetEdns0(payload, query.DNSSECOK)
 	}
 	client := &dns.Client{Net: query.Protocol, Timeout: e.Timeout}
+	if query.SourceIP != "" {
+		ip := net.ParseIP(query.SourceIP)
+		if ip != nil {
+			if query.Protocol == "udp" {
+				client.Dialer = &net.Dialer{LocalAddr: &net.UDPAddr{IP: ip}}
+			} else {
+				client.Dialer = &net.Dialer{LocalAddr: &net.TCPAddr{IP: ip}}
+			}
+		}
+	}
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
 	response, rtt, err := client.ExchangeContext(ctx, message, address)
 	result.Latency = rtt
@@ -51,11 +61,11 @@ func (e *QueryEngine) Execute(ctx context.Context, target models.Target, query m
 		return failResult(result, class, errors.New(queryErrorMessage(class)))
 	}
 	if response == nil {
-		return failResult(result, models.QueryMalformedResponse, errors.New("DNS sunucusu boş yanıt döndürdü"))
+		return failResult(result, models.QueryMalformedResponse, errors.New("DNS server returned empty response"))
 	}
 	packed, err := response.Pack()
 	if err != nil {
-		return failResult(result, models.QueryMalformedResponse, errors.New("DNS yanıtı işlenemedi"))
+		return failResult(result, models.QueryMalformedResponse, errors.New("failed to parse DNS response"))
 	}
 	result.ResponseSize = len(packed)
 	result.Truncated = response.Truncated
@@ -72,31 +82,31 @@ func validateQuery(target models.Target, query *models.DNSQuery) error {
 		return err
 	}
 	if target.Port < 1 || target.Port > 65535 {
-		return errors.New("geçersiz DNS portu")
+		return errors.New("invalid DNS port")
 	}
 	query.Protocol = strings.ToLower(strings.TrimSpace(query.Protocol))
 	if query.Protocol != "udp" && query.Protocol != "tcp" {
-		return errors.New("protokol udp veya tcp olmalıdır")
+		return errors.New("protocol must be udp or tcp")
 	}
 	if query.Protocol == "udp" && !target.UDPEnabled {
-		return errors.New("target için UDP etkin değil")
+		return errors.New("UDP is not enabled for target")
 	}
 	if query.Protocol == "tcp" && !target.TCPEnabled {
-		return errors.New("target için TCP etkin değil")
+		return errors.New("TCP is not enabled for target")
 	}
 	query.Domain = strings.TrimSpace(query.Domain)
 	if query.Domain == "" {
-		return errors.New("domain zorunludur")
+		return errors.New("domain is required")
 	}
 	if _, ok := dns.IsDomainName(dns.Fqdn(query.Domain)); !ok {
-		return errors.New("geçersiz DNS domain adı")
+		return errors.New("invalid DNS domain name")
 	}
 	query.QueryType = strings.ToUpper(strings.TrimSpace(query.QueryType))
 	if _, ok := queryTypes[query.QueryType]; !ok {
-		return errors.New("desteklenmeyen DNS query type")
+		return errors.New("unsupported DNS query type")
 	}
 	if query.EDNSPayload > 0 && query.EDNSPayload < 512 {
-		return errors.New("EDNS payload en az 512 olmalıdır")
+		return errors.New("EDNS payload must be at least 512")
 	}
 	return nil
 }
@@ -128,14 +138,14 @@ func classifyQueryError(ctx context.Context, err error) models.QueryErrorClass {
 func queryErrorMessage(class models.QueryErrorClass) string {
 	switch class {
 	case models.QueryCancelled:
-		return "DNS sorgusu iptal edildi"
+		return "DNS query cancelled"
 	case models.QueryTimeout:
-		return "DNS sorgusu zaman aşımına uğradı"
+		return "DNS query timed out"
 	case models.QueryConnectionRefused:
-		return "DNS bağlantısı reddedildi"
+		return "DNS connection refused"
 	case models.QueryNetworkUnreachable:
-		return "DNS ağına erişilemiyor"
+		return "DNS network unreachable"
 	default:
-		return "DNS sorgusu tamamlanamadı"
+		return "DNS query failed"
 	}
 }

@@ -1,36 +1,154 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Activity, BarChart3, ChevronRight, CircleGauge, FileText, History, Plus, Radar, Server, Settings, ShieldCheck, Trash2, X, Zap } from 'lucide-react'
-import { api } from './api'
-import type { DiscoveryProfile, Target, TargetInput, TestRun } from './types'
+import { useState, type FormEvent } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { Settings, X } from 'lucide-react';
+import { api } from './api';
+import type { DiscoveryProfile, Target, TargetInput } from './types';
 
-const emptyForm:TargetInput={name:'',ip_address:'',port:53,description:'',environment:'Lab',udp_enabled:true,tcp_enabled:true,tags:[]}
+import { Sidebar } from './components/Layout/Sidebar';
+import { TargetsPage } from './pages/Targets';
+import { TestListPage } from './pages/Tests';
+import { PlaceholderPage } from './pages/Placeholder';
+import { TargetForm } from './components/Forms/TargetForm';
+import { DiscoveryModal } from './components/Discovery/DiscoveryModal';
+import { NewTestPage } from './pages/NewTest';
 
-export default function App(){
-  const queryClient=useQueryClient();const [showForm,setShowForm]=useState(false);const [form,setForm]=useState<TargetInput>(emptyForm);const [notice,setNotice]=useState('');const [profile,setProfile]=useState<{target:Target;data:DiscoveryProfile}|null>(null)
-  const targets=useQuery({queryKey:['targets'],queryFn:api.listTargets});const tests=useQuery({queryKey:['tests'],queryFn:api.listTests})
-  const create=useMutation({mutationFn:api.createTarget,onSuccess:()=>{queryClient.invalidateQueries({queryKey:['targets']});setForm(emptyForm);setShowForm(false);setNotice('Target güvenli biçimde kaydedildi.')},onError:(e:Error)=>setNotice(e.message)})
-  const remove=useMutation({mutationFn:api.deleteTarget,onSuccess:()=>queryClient.invalidateQueries({queryKey:['targets']}),onError:(e:Error)=>setNotice(e.message)})
-  const discover=useMutation({mutationFn:async(t:Target)=>({target:t,data:await api.discoverTarget(t.id)}),onSuccess:setProfile,onError:(e:Error)=>setNotice(e.message)})
-  const submit=(e:FormEvent)=>{e.preventDefault();setNotice('');create.mutate(form)};const targetItems=targets.data??[];const testItems=tests.data??[];const running=testItems.filter(item=>item.status==='RUNNING').length
-  return <div className="shell">
-    <aside className="sidebar"><div className="brand"><div className="brandmark"><Radar size={22}/></div><div><b>DNStrike</b><small>RESILIENCE LAB</small></div></div><nav><Nav to="/dashboard" icon={<CircleGauge/>} label="Dashboard"/><Nav to="/targets" icon={<Server/>} label="Targets"/><Nav to="/tests/new" icon={<Zap/>} label="New Test"/><Nav to="/tests/running" icon={<Activity/>} label="Running Tests" badge={String(running)}/><Nav to="/tests/history" icon={<History/>} label="Test History"/><Nav to="/reports" icon={<FileText/>} label="Reports"/></nav><div className="sideBottom"><Nav to="/settings" icon={<Settings/>} label="Settings"/><div className="safety"><ShieldCheck size={18}/><div><b>Safe mode active</b><span>Private networks only</span></div></div></div></aside>
-    <main>{notice&&<div className="notice" onClick={()=>setNotice('')}>{notice}<X size={15}/></div>}<Routes><Route path="/dashboard" element={<DashboardPage targets={targetItems} tests={testItems}/>}/><Route path="/targets" element={<TargetsPage items={targetItems} loading={targets.isLoading} failed={targets.isError} openForm={()=>setShowForm(true)} discover={target=>discover.mutate(target)} discovering={discover.isPending} remove={target=>{if(confirm(`${target.name} silinsin mi?`))remove.mutate(target.id)}}/>}/><Route path="/tests/new" element={<PlaceholderPage eyebrow="TEST ORCHESTRATOR" title="New Test" description="Benchmark configuration will be enabled when the orchestrator and STOP lifecycle are connected." icon={<Zap/>}/>}/><Route path="/tests/running" element={<TestListPage title="Running Tests" description="Tests currently executing through the orchestrator." items={testItems.filter(item=>item.status==='RUNNING')} loading={tests.isLoading}/>}/><Route path="/tests/history" element={<TestListPage title="Test History" description="Persisted lifecycle records and scenario configurations." items={testItems} loading={tests.isLoading}/>}/><Route path="/reports" element={<PlaceholderPage eyebrow="EXPORTS" title="Reports" description="HTML, JSON and CSV reports will become available after benchmark execution." icon={<FileText/>}/>}/><Route path="/settings" element={<PlaceholderPage eyebrow="PLATFORM" title="Settings" description="Public target testing remains disabled. Runtime safety settings will be exposed here later." icon={<Settings/>}/>}/><Route path="*" element={<Navigate to="/dashboard" replace/>}/></Routes></main>
-    {showForm&&<TargetForm form={form} setForm={setForm} close={()=>setShowForm(false)} submit={submit} pending={create.isPending} error={create.error as Error|null}/>}
-    {profile&&<Discovery target={profile.target} data={profile.data} close={()=>setProfile(null)}/>} </div>
+const emptyForm: TargetInput = { 
+  name: '', ip_address: '', port: 53, description: '', environment: 'Lab', 
+  udp_enabled: true, tcp_enabled: true, tags: [] 
+};
+
+export default function App() {
+  const queryClient = useQueryClient();
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState<TargetInput>(emptyForm);
+  const [notice, setNotice] = useState('');
+  const [profile, setProfile] = useState<{ target: Target; data: DiscoveryProfile } | null>(null);
+
+  const targets = useQuery({ queryKey: ['targets'], queryFn: api.listTargets, refetchInterval: 5000 });
+  const tests = useQuery({ queryKey: ['tests'], queryFn: api.listTests, refetchInterval: 3000 });
+
+  const create = useMutation({
+    mutationFn: api.createTarget,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['targets'] });
+      setForm(emptyForm);
+      setShowForm(false);
+      setNotice('Target safely registered.');
+    },
+    onError: (e: Error) => setNotice(e.message)
+  });
+
+  const remove = useMutation({
+    mutationFn: api.deleteTarget,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['targets'] }),
+    onError: (e: Error) => setNotice(e.message)
+  });
+
+  const discover = useMutation({
+    mutationFn: async (t: Target) => ({ target: t, data: await api.discoverTarget(t.id) }),
+    onSuccess: setProfile,
+    onError: (e: Error) => setNotice(e.message)
+  });
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setNotice('');
+    create.mutate(form);
+  };
+
+  const targetItems = targets.data ?? [];
+  const testItems = tests.data ?? [];
+  const runningCount = testItems.filter(item => item.status === 'RUNNING').length;
+
+  return (
+    <div className="app-container">
+      <Sidebar runningTestsCount={runningCount} />
+      
+      <main className="main-content">
+        {notice && (
+          <div className="notice" onClick={() => setNotice('')}>
+            {notice}
+            <X size={16} />
+          </div>
+        )}
+        
+        <Routes>
+          <Route 
+            path="/targets" 
+            element={
+              <TargetsPage 
+                items={targetItems} 
+                loading={targets.isLoading} 
+                failed={targets.isError} 
+                openForm={() => setShowForm(true)} 
+                discover={target => discover.mutate(target)} 
+                discovering={discover.isPending} 
+                remove={target => remove.mutate(target.id)} 
+              />
+            } 
+          />
+          <Route 
+            path="/tests/new" 
+            element={<NewTestPage />} 
+          />
+          <Route 
+            path="/tests/running" 
+            element={
+              <TestListPage 
+                title="Running Tests" 
+                description="Tests currently executing through the orchestrator." 
+                items={testItems.filter(item => item.status === 'RUNNING')} 
+                targets={targetItems}
+                loading={tests.isLoading} 
+              />
+            } 
+          />
+          <Route 
+            path="/tests/history" 
+            element={
+              <TestListPage 
+                title="Test History" 
+                description="Persisted lifecycle records and scenario configurations." 
+                items={testItems} 
+                targets={targetItems}
+                loading={tests.isLoading} 
+              />
+            } 
+          />
+          <Route 
+            path="/settings" 
+            element={
+              <PlaceholderPage 
+                eyebrow="PLATFORM" 
+                title="Settings" 
+                description="Public target testing remains disabled. Runtime safety settings will be exposed here later." 
+                icon={<Settings />} 
+              />
+            } 
+          />
+          <Route path="*" element={<Navigate to="/targets" replace />} />
+        </Routes>
+      </main>
+
+      {showForm && (
+        <TargetForm 
+          form={form} 
+          setForm={setForm} 
+          close={() => setShowForm(false)} 
+          submit={submit} 
+          pending={create.isPending} 
+          error={create.error as Error | null} 
+        />
+      )}
+      
+      {profile && (
+        <DiscoveryModal 
+          target={profile.target} 
+          data={profile.data} 
+          close={() => setProfile(null)} 
+        />
+      )}
+    </div>
+  );
 }
-
-function Nav({to,icon,label,badge}:{to:string;icon:ReactNode;label:string;badge?:string}){return <NavLink to={to} className={({isActive})=>isActive?'nav active':'nav'}>{icon}<span>{label}</span>{badge&&<i>{badge}</i>}</NavLink>}
-function PageHeader({eyebrow,title,description,action}:{eyebrow:string;title:string;description:string;action?:ReactNode}){return <header><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</header>}
-function DashboardPage({targets,tests}:{targets:Target[];tests:TestRun[]}){return <><PageHeader eyebrow="OVERVIEW" title="Dashboard" description="Authorized DNS infrastructure and test lifecycle status."/><section className="summary"><Stat label="Total targets" value={String(targets.length)} detail="Authorized endpoints"/><Stat label="Test records" value={String(tests.length)} detail="Persisted lifecycle entries"/><Stat label="Completed" value={String(tests.filter(x=>x.status==='COMPLETED').length)} detail="Finished assessments"/></section><PlaceholderPanel title="Platform ready" text="Target discovery is active. Benchmark execution is the next milestone." icon={<CircleGauge/>}/></>}
-function TargetsPage({items,loading,failed,openForm,discover,discovering,remove}:{items:Target[];loading:boolean;failed:boolean;openForm:()=>void;discover:(target:Target)=>void;discovering:boolean;remove:(target:Target)=>void}){return <><PageHeader eyebrow="INFRASTRUCTURE" title="DNS Targets" description="Manage authorized resolvers and inspect their protocol posture." action={<button className="primary" onClick={openForm}><Plus size={17}/>Add target</button>}/><section className="summary"><Stat label="Total targets" value={String(items.length)} detail="Authorized endpoints"/><Stat label="UDP enabled" value={String(items.filter(x=>x.udp_enabled).length)} detail="Datagram checks ready"/><Stat label="TCP enabled" value={String(items.filter(x=>x.tcp_enabled).length)} detail="Fallback checks ready"/></section><section className="panel"><div className="panelTitle"><div><h2>Configured targets</h2><p>Discovery sends one bounded probe per enabled protocol.</p></div><span className="count">{items.length} TARGETS</span></div>{loading?<div className="empty">Loading targets…</div>:failed?<div className="empty error">Targets could not be loaded.</div>:items.length===0?<div className="empty"><div className="emptyIcon"><Server/></div><h3>No targets yet</h3><p>Add a private or local DNS server to begin discovery.</p><button className="secondary" onClick={openForm}>Add your first target</button></div>:<div className="tableWrap"><table><thead><tr><th>Target</th><th>Endpoint</th><th>Environment</th><th>Protocols</th><th>Tags</th><th></th></tr></thead><tbody>{items.map(t=><tr key={t.id}><td><div className="targetName"><span className="statusDot"/><div><b>{t.name}</b><small>{t.description||'No description'}</small></div></div></td><td><code>{t.ip_address}:{t.port}</code></td><td>{t.environment||'—'}</td><td><div className="pills">{t.udp_enabled&&<span>UDP</span>}{t.tcp_enabled&&<span>TCP</span>}</div></td><td><div className="tags">{t.tags.length?t.tags.map(x=><i key={x}>{x}</i>):'—'}</div></td><td><div className="actions"><button title="Discover" disabled={discovering} onClick={()=>discover(t)}><Radar size={16}/>Discover</button><button className="iconButton danger" title="Delete" onClick={()=>remove(t)}><Trash2 size={16}/></button><ChevronRight size={16}/></div></td></tr>)}</tbody></table></div>}</section></>}
-function TestListPage({title,description,items,loading}:{title:string;description:string;items:TestRun[];loading:boolean}){return <><PageHeader eyebrow="TEST OPERATIONS" title={title} description={description}/><section className="panel"><div className="panelTitle"><div><h2>{title}</h2><p>Statuses are read directly from SQLite.</p></div><span className="count">{items.length} TESTS</span></div>{loading?<div className="empty">Loading tests…</div>:items.length===0?<div className="empty"><div className="emptyIcon"><History/></div><h3>No matching tests</h3><p>Test execution will appear here when the orchestrator is enabled.</p></div>:<div className="tableWrap"><table><thead><tr><th>ID</th><th>Scenario</th><th>Target</th><th>Status</th><th>Created</th></tr></thead><tbody>{items.map(item=><tr key={item.id}><td><code>#{item.id}</code></td><td>{item.scenario}</td><td>Target #{item.target_id}</td><td><span className={`testStatus status-${item.status.toLowerCase()}`}>{item.status}</span></td><td>{new Date(item.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}</section></>}
-function PlaceholderPage({eyebrow,title,description,icon}:{eyebrow:string;title:string;description:string;icon:ReactNode}){return <><PageHeader eyebrow={eyebrow} title={title} description={description}/><PlaceholderPanel title="Development milestone" text={description} icon={icon}/></>}
-function PlaceholderPanel({title,text,icon}:{title:string;text:string;icon:ReactNode}){return <section className="panel"><div className="empty"><div className="emptyIcon">{icon}</div><h3>{title}</h3><p>{text}</p></div></section>}
-function Stat({label,value,detail}:{label:string;value:string;detail:string}){return <div className="stat"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>}
-function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
-function TargetForm({form,setForm,close,submit,pending,error}:{form:TargetInput;setForm:(form:TargetInput)=>void;close:()=>void;submit:(event:FormEvent)=>void;pending:boolean;error:Error|null}){return <div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><form className="modal" onSubmit={submit}><div className="modalHead"><div><span className="eyebrow">AUTHORIZED ASSET</span><h2>Add DNS target</h2></div><button type="button" className="iconButton" onClick={close}><X/></button></div><p className="helper">Only private, loopback, link-local and IPv6 ULA addresses are accepted.</p><div className="grid2"><Field label="Target name"><input required maxLength={100} placeholder="Internal AD DNS" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field><Field label="Environment"><input placeholder="Production Lab" value={form.environment} onChange={e=>setForm({...form,environment:e.target.value})}/></Field><Field label="DNS server IP"><input required placeholder="192.168.1.53" value={form.ip_address} onChange={e=>setForm({...form,ip_address:e.target.value})}/></Field><Field label="Port"><input required type="number" min={1} max={65535} value={form.port} onChange={e=>setForm({...form,port:Number(e.target.value)})}/></Field></div><Field label="Description"><textarea rows={3} placeholder="Resolver role and ownership notes" value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></Field><Field label="Tags (comma separated)"><input placeholder="ad, branch-01" onChange={e=>setForm({...form,tags:e.target.value.split(',').map(x=>x.trim()).filter(Boolean)})}/></Field><div className="checks"><label><input type="checkbox" checked={form.udp_enabled} onChange={e=>setForm({...form,udp_enabled:e.target.checked})}/>UDP enabled</label><label><input type="checkbox" checked={form.tcp_enabled} onChange={e=>setForm({...form,tcp_enabled:e.target.checked})}/>TCP enabled</label></div>{error&&<div className="formError">{error.message}</div>}<div className="modalFoot"><button type="button" className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={pending}>{pending?'Saving…':'Save target'}</button></div></form></div>}
-function Bool({label,value}:{label:string;value:boolean}){return <div className="checkRow"><span>{label}</span><b className={value?'yes':'no'}>{value?'Supported':'Not detected'}</b></div>}
-function Discovery({target,data,close}:{target:Target;data:DiscoveryProfile;close:()=>void}){return <div className="overlay"><div className="modal discovery"><div className="modalHead"><div><span className="eyebrow">SERVER PROFILE</span><h2>{target.name}</h2><code>{data.target}</code></div><button className="iconButton" onClick={close}><X/></button></div><div className="latency"><div><span>Average latency</span><strong>{data.average_latency_ms.toFixed(2)} ms</strong></div><BarChart3/></div><div className="protocols"><Protocol name="UDP" item={data.udp}/><Protocol name="TCP" item={data.tcp}/></div><div className="checksGrid"><Bool label="Recursion" value={data.recursion_enabled}/><Bool label="Authoritative" value={data.authoritative}/><Bool label="EDNS" value={data.edns_supported}/><Bool label="DNSSEC signals" value={data.dnssec_supported}/><Bool label="TCP fallback" value={data.tcp_fallback}/><div className="checkRow"><span>Response size</span><b>{data.response_size} B</b></div></div><div className="flags">FLAGS <b>RA {Number(data.flags.ra)}</b><b>RD {Number(data.flags.rd)}</b><b>AA {Number(data.flags.aa)}</b><b>TC {Number(data.flags.tc)}</b></div><div className="modalFoot"><button className="primary" onClick={close}>Done</button></div></div></div>}
-function Protocol({name,item}:{name:string;item:DiscoveryProfile['udp']}){return <div className={item.available?'protocol ok':'protocol fail'}><span>{name}</span><strong>{item.available?'Available':'Unavailable'}</strong><small>{item.available?`${item.latency_ms.toFixed(2)} ms`:item.error}</small></div>}

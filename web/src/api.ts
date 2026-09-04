@@ -15,5 +15,7 @@ export const api={
   discoverTarget:(id:number)=>request<DiscoveryProfile>(`/api/targets/${id}/check`,{method:'POST'}),
   listTests:()=>request<TestRun[]>('/api/tests'),
   getTest:(id:number)=>request<TestRun>(`/api/tests/${id}`),
-  createTest:(input:CreateTestInput)=>request<TestRun>('/api/tests',{method:'POST',body:JSON.stringify(input)})
+  deleteTest:(id:number)=>request<void>(`/api/tests/${id}`,{method:'DELETE'}),
+  createTest:(input:CreateTestInput)=>request<TestRun>('/api/tests',{method:'POST',body:JSON.stringify(input)}),
+  listScenarios:()=>request<import('./types').ScenarioMetadata[]>('/api/scenarios')
 }

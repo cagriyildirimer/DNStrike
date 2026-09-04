@@ -49,6 +49,7 @@ type Test struct {
 	FinishedAt      *time.Time      `json:"finished_at,omitempty"`
 	DurationSeconds int             `json:"duration_seconds"`
 	Config          json.RawMessage `json:"config"`
+	Result          json.RawMessage `json:"result,omitempty"`
 	ResilienceScore *float64        `json:"resilience_score,omitempty"`
 }
 

@@ -47,7 +47,14 @@ func main() {
 	registry := scenarios.DefaultRegistry()
 	targetService := target.NewService(store)
 	testService := testrun.NewService(store, store, registry)
-	router := api.New(targetService, testService, dnsengine.NewDiscovery(3*time.Second), registry, websocket.NewHub(), webui.Assets()).Router()
+	hub := websocket.NewHub()
+	
+	// Start Orchestrator
+	orchestrator := testrun.NewOrchestrator(testService, store, registry, hub)
+	orchestrator.Start()
+	defer orchestrator.Stop()
+	
+	router := api.New(targetService, testService, dnsengine.NewDiscovery(3*time.Second), registry, hub, webui.Assets()).Router()
 	server := &http.Server{Addr: env("DNSTRIKE_ADDR", "127.0.0.1:8080"), Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		logger.Info("DNStrike listening", "address", server.Addr)

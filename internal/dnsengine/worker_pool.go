@@ -24,10 +24,10 @@ type WorkerPool struct {
 
 func NewWorkerPool(executor Executor, config PoolConfig) (*WorkerPool, error) {
 	if executor == nil {
-		return nil, errors.New("DNS query executor zorunludur")
+		return nil, errors.New("DNS query executor is required")
 	}
 	if config.Workers < 1 || config.Workers > 256 {
-		return nil, errors.New("worker sayısı 1 ile 256 arasında olmalıdır")
+		return nil, errors.New("number of workers must be between 1 and 256")
 	}
 	if config.Burst == 0 {
 		config.Burst = 1

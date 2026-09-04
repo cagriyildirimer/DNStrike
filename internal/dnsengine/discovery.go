@@ -70,7 +70,7 @@ func (d *Discovery) exchange(ctx context.Context, network, address string, edns 
 		return nil, rtt, classify(err)
 	}
 	if resp == nil {
-		return nil, rtt, errors.New("DNS sunucusu boş yanıt döndürdü")
+		return nil, rtt, errors.New("DNS server returned empty response")
 	}
 	return resp, rtt, nil
 }
@@ -109,21 +109,21 @@ func applyResponse(p *models.DiscoveryProfile, r *dns.Msg) {
 }
 func classify(err error) error {
 	if errors.Is(err, context.Canceled) {
-		return errors.New("işlem iptal edildi")
+		return errors.New("operation cancelled")
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return errors.New("DNS sorgusu zaman aşımına uğradı")
+		return errors.New("DNS query timed out")
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return errors.New("DNS sorgusu zaman aşımına uğradı")
+		return errors.New("DNS query timed out")
 	}
 	s := strings.ToLower(err.Error())
 	if strings.Contains(s, "refused") {
-		return errors.New("bağlantı reddedildi")
+		return errors.New("connection refused")
 	}
 	if strings.Contains(s, "unreachable") {
-		return errors.New("ağa erişilemiyor")
+		return errors.New("network unreachable")
 	}
-	return errors.New("DNS sunucusuna ulaşılamadı")
+	return errors.New("DNS server unreachable")
 }

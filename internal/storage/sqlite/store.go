@@ -57,6 +57,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "tests", "created_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "tests", "result_summary_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -131,6 +134,26 @@ func (s *Store) GetTarget(ctx context.Context, id int64) (models.Target, error) 
 }
 
 func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT id FROM tests WHERE target_id=?", id)
+	if err == nil {
+		var testIDs []string
+		for rows.Next() {
+			var tid int
+			if err := rows.Scan(&tid); err == nil {
+				testIDs = append(testIDs, fmt.Sprintf("%d", tid))
+			}
+		}
+		rows.Close()
+		if len(testIDs) > 0 {
+			inClause := strings.Join(testIDs, ",")
+			s.db.ExecContext(ctx, "DELETE FROM test_results WHERE test_id IN ("+inClause+")")
+			s.db.ExecContext(ctx, "DELETE FROM metrics WHERE test_id IN ("+inClause+")")
+			s.db.ExecContext(ctx, "DELETE FROM findings WHERE test_id IN ("+inClause+")")
+			s.db.ExecContext(ctx, "DELETE FROM reports WHERE test_id IN ("+inClause+")")
+			s.db.ExecContext(ctx, "DELETE FROM tests WHERE target_id=?", id)
+		}
+	}
+
 	r, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -171,7 +194,7 @@ func (s *Store) CreateTest(ctx context.Context, test *models.Test) error {
 
 func (s *Store) ListTests(ctx context.Context, filter models.TestFilter) ([]models.Test, error) {
 	query := strings.Builder{}
-	query.WriteString(`SELECT id,target_id,scenario,status,created_at,started_at,finished_at,duration,config_json,resilience_score FROM tests WHERE 1=1`)
+	query.WriteString(`SELECT id,target_id,scenario,status,created_at,started_at,finished_at,duration,config_json,resilience_score,result_summary_json FROM tests WHERE 1=1`)
 	args := make([]any, 0, 4)
 	if filter.TargetID > 0 {
 		query.WriteString(" AND target_id=?")
@@ -208,7 +231,7 @@ func (s *Store) ListTests(ctx context.Context, filter models.TestFilter) ([]mode
 }
 
 func (s *Store) GetTest(ctx context.Context, id int64) (models.Test, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,target_id,scenario,status,created_at,started_at,finished_at,duration,config_json,resilience_score FROM tests WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id,target_id,scenario,status,created_at,started_at,finished_at,duration,config_json,resilience_score,result_summary_json FROM tests WHERE id=?`, id)
 	test, err := scanTest(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return test, ErrNotFound
@@ -240,16 +263,59 @@ func (s *Store) TransitionTest(ctx context.Context, id int64, from, to models.Te
 	return nil
 }
 
+func (s *Store) UpdateTestResult(ctx context.Context, id int64, score int, result json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE tests SET resilience_score=?, result_summary_json=? WHERE id=?", score, string(result), id)
+	return err
+}
+
+func (s *Store) DeleteTest(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete associated records first
+	if _, err := tx.ExecContext(ctx, "DELETE FROM test_results WHERE test_id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM metrics WHERE test_id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM findings WHERE test_id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM reports WHERE test_id=?", id); err != nil {
+		return err
+	}
+
+	// Delete test
+	result, err := tx.ExecContext(ctx, "DELETE FROM tests WHERE id=?", id)
+	if err != nil {
+		return err
+	}
+	
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	
+	return tx.Commit()
+}
+
 func scanTest(s scanner) (models.Test, error) {
 	var test models.Test
-	var status, created, config string
+	var status, created, config, result string
 	var started, finished sql.NullString
 	var score sql.NullFloat64
-	if err := s.Scan(&test.ID, &test.TargetID, &test.Scenario, &status, &created, &started, &finished, &test.DurationSeconds, &config, &score); err != nil {
+	if err := s.Scan(&test.ID, &test.TargetID, &test.Scenario, &status, &created, &started, &finished, &test.DurationSeconds, &config, &score, &result); err != nil {
 		return test, err
 	}
 	test.Status = models.TestStatus(status)
 	test.Config = json.RawMessage(config)
+	if result != "" && result != "{}" {
+		test.Result = json.RawMessage(result)
+	}
 	test.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	if started.Valid && started.String != "" {
 		value, err := time.Parse(time.RFC3339Nano, started.String)

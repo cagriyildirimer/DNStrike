@@ -19,6 +19,7 @@ type DNSQuery struct {
 	Domain      string `json:"domain"`
 	QueryType   string `json:"query_type"`
 	Protocol    string `json:"protocol"`
+	SourceIP    string `json:"source_ip,omitempty"`
 	EDNSPayload uint16 `json:"edns_payload,omitempty"`
 	DNSSECOK    bool   `json:"dnssec_ok,omitempty"`
 }

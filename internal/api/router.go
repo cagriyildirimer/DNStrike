@@ -46,6 +46,7 @@ func (s *Server) Router() *gin.Engine {
 	api.POST("/tests", s.createTest)
 	api.GET("/tests", s.listTests)
 	api.GET("/tests/:id", s.getTest)
+	api.DELETE("/tests/:id", s.deleteTest)
 	r.GET("/ws/tests/:id", s.hub.Serve)
 	if s.assets != nil {
 		r.NoRoute(s.serveFrontend)
@@ -241,4 +242,21 @@ func (s *Server) serveFrontend(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", index)
+}
+
+func (s *Server) deleteTest(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	err := s.tests.Delete(c.Request.Context(), id)
+	if errors.Is(err, sqlite.ErrNotFound) {
+		notFound(c, "Test")
+		return
+	}
+	if err != nil {
+		serverError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

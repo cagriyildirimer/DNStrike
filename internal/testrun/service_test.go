@@ -32,6 +32,12 @@ func (f *fakeRepository) TransitionTest(_ context.Context, _ int64, _, to models
 	}
 	return nil
 }
+func (f *fakeRepository) UpdateTestResult(_ context.Context, _ int64, _ int, _ json.RawMessage) error {
+	return nil
+}
+func (f *fakeRepository) DeleteTest(_ context.Context, _ int64) error {
+	return nil
+}
 
 type fakeTargets struct{ err error }
 

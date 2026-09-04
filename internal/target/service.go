@@ -24,10 +24,10 @@ func (s *Service) Create(ctx context.Context, in models.CreateTargetInput) (mode
 	in.Name = strings.TrimSpace(in.Name)
 	in.IPAddress = strings.TrimSpace(in.IPAddress)
 	if in.Name == "" {
-		return models.Target{}, errors.New("target adı zorunludur")
+		return models.Target{}, errors.New("target name is required")
 	}
 	if len(in.Name) > 100 {
-		return models.Target{}, errors.New("target adı en fazla 100 karakter olabilir")
+		return models.Target{}, errors.New("target name can be at most 100 characters")
 	}
 	if err := security.ValidatePrivateIP(in.IPAddress); err != nil {
 		return models.Target{}, err
@@ -36,7 +36,7 @@ func (s *Service) Create(ctx context.Context, in models.CreateTargetInput) (mode
 		in.Port = 53
 	}
 	if in.Port < 1 || in.Port > 65535 {
-		return models.Target{}, errors.New("port 1 ile 65535 arasında olmalıdır")
+		return models.Target{}, errors.New("port must be between 1 and 65535")
 	}
 	udp, tcp := true, true
 	if in.UDPEnabled != nil {
@@ -46,7 +46,7 @@ func (s *Service) Create(ctx context.Context, in models.CreateTargetInput) (mode
 		tcp = *in.TCPEnabled
 	}
 	if !udp && !tcp {
-		return models.Target{}, errors.New("UDP veya TCP protokollerinden en az biri etkin olmalıdır")
+		return models.Target{}, errors.New("at least one of UDP or TCP protocols must be enabled")
 	}
 	t := models.Target{Name: in.Name, IPAddress: in.IPAddress, Port: in.Port, Description: strings.TrimSpace(in.Description), Environment: strings.TrimSpace(in.Environment), UDPEnabled: udp, TCPEnabled: tcp, Tags: normalizeTags(in.Tags)}
 	if err := s.repo.CreateTarget(ctx, &t); err != nil {

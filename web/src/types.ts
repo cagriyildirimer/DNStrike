@@ -3,21 +3,30 @@ export interface Target {
   udp_enabled: boolean; tcp_enabled: boolean; tags: string[]; created_at: string; updated_at: string
 }
 export type TargetInput = Omit<Target, 'id'|'created_at'|'updated_at'>
-export interface ProtocolCheck { available: boolean; latency_ms: number; error?: string }
+interface ProtocolCheck { available: boolean; latency_ms: number; error?: string }
 export interface DiscoveryProfile {
   target: string; checked_at: string; udp: ProtocolCheck; tcp: ProtocolCheck; recursion_enabled: boolean;
   authoritative: boolean; edns_supported: boolean; dnssec_supported: boolean; response_size: number;
   tcp_fallback: boolean; average_latency_ms: number; flags: { ra:boolean; rd:boolean; aa:boolean; tc:boolean }
 }
-export type TestStatus='PENDING'|'RUNNING'|'COMPLETED'|'FAILED'|'CANCELLED'
+type TestStatus='PENDING'|'RUNNING'|'COMPLETED'|'FAILED'|'CANCELLED'
 export interface TestRun {
   id:number;target_id:number;scenario:string;status:TestStatus;created_at:string;started_at?:string;
-  finished_at?:string;duration_seconds:number;config:Record<string,unknown>;resilience_score?:number
+  finished_at?:string;duration_seconds:number;config:Record<string,unknown>;resilience_score?:number;
+  result?:Record<string,unknown>;
 }
 export interface CreateTestInput { target_id:number;scenario:string;config:Record<string,unknown> }
-export interface MetricSnapshot {
-  timestamp:string;elapsed_seconds:number;current_qps:number;responses_per_second:number;total_queries:number;
-  total_responses:number;timeouts:number;timeout_percent:number;errors:number;response_codes:Record<string,number>;
-  min_latency_ms:number;average_latency_ms:number;max_latency_ms:number;p50_latency_ms:number;p90_latency_ms:number;
-  p95_latency_ms:number;p99_latency_ms:number
+
+export interface ScenarioLimits { max_qps: number; max_duration_seconds: number; max_workers: number; }
+
+export interface ScenarioMetadata {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  supported_protocols: string[];
+  required_parameters: string[];
+  risk_level: string;
+  default_config: Record<string, unknown>;
+  recommended_limits: ScenarioLimits;
 }
