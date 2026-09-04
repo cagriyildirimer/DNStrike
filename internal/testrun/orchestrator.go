@@ -147,6 +147,8 @@ func (o *Orchestrator) executeTest(id int64) {
 			score, result, execErr = o.runAmplificationAuditScenario(ctx, test, target, meta, config)
 		} else if meta.ID == "zone-transfer-audit" {
 			score, result, execErr = o.runZoneTransferAuditScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "dns-fuzzing" {
+			score, result, execErr = o.runDNSFuzzingScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
@@ -1032,6 +1034,136 @@ func (o *Orchestrator) runZoneTransferAuditScenario(ctx context.Context, test mo
 		"status_summary":       statusText,
 		"record_counts":        recordCounts,
 		"sample_records":       records,
+	}
+
+	return score, result, nil
+}
+
+// DNS Fuzzing & Malformed Packet Test Logic
+func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"Starting DNS Fuzzing & Malformed Packet Test..."}`))
+
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	type fuzzVector struct {
+		Category string `json:"category"`
+		Name     string `json:"name"`
+		Msg      *dns.Msg
+		RawBytes []byte
+	}
+
+	// 1. Reserved Opcode Fuzzing
+	m1 := new(dns.Msg)
+	m1.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m1.Opcode = 6 // Reserved opcode
+
+	// 2. Label Overflow Fuzzing (>63 chars in single label)
+	m2 := new(dns.Msg)
+	overflowLabel := strings.Repeat("a", 70) + ".example.com."
+	m2.SetQuestion(overflowLabel, dns.TypeA)
+
+	// 3. Raw Truncated Header Mutator
+	rawMutatedHeader := []byte{0x12, 0x34, 0xff, 0xff, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	// 4. Invalid EDNS0 Option & Version Fuzzing
+	m4 := new(dns.Msg)
+	m4.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	opt4 := new(dns.OPT)
+	opt4.Hdr.Name = "."
+	opt4.Hdr.Rrtype = dns.TypeOPT
+	opt4.SetUDPSize(4096)
+	opt4.SetVersion(15) // Invalid EDNS0 version
+	opt4.Option = append(opt4.Option, &dns.EDNS0_LOCAL{Code: 0xffff, Data: []byte("FUZZ_PAYLOAD_DATA")})
+	m4.Extra = append(m4.Extra, opt4)
+
+	// 5. Invalid RR Type & Class Fuzzing
+	m5 := new(dns.Msg)
+	m5.Question = []dns.Question{{Name: dns.Fqdn(domain), Qtype: 0xffff, Qclass: 0xffff}}
+
+	vectors := []fuzzVector{
+		{Category: "OPCODE_MUTATION", Name: "Reserved Opcode (6)", Msg: m1},
+		{Category: "LABEL_OVERFLOW", Name: "Single Label Overflow (>63 chars)", Msg: m2},
+		{Category: "HEADER_CORRUPTION", Name: "Truncated/Corrupted Raw Header Bytes", RawBytes: rawMutatedHeader},
+		{Category: "EDNS0_CORRUPTION", Name: "Invalid EDNS0 Version (15) & Custom Local Option", Msg: m4},
+		{Category: "CLASS_MUTATION", Name: "Invalid Question Type (0xFFFF) & Class (0xFFFF)", Msg: m5},
+	}
+
+	type vectorResult struct {
+		Category       string `json:"category"`
+		Name           string `json:"name"`
+		ResponseStatus string `json:"response_status"`
+		HealthCheck    string `json:"health_check"`
+	}
+
+	var vectorResults []vectorResult
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	udpClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+
+	targetCrashed := false
+	score := 100
+
+	for idx, vec := range vectors {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/5] Testing Vector: %s (%s)..."}`, idx+1, vec.Name, vec.Category)))
+
+		respStatus := "NO RESPONSE (DROPPED)"
+
+		if vec.Msg != nil {
+			resp, _, err := udpClient.ExchangeContext(ctx, vec.Msg, address)
+			if err == nil && resp != nil {
+				respStatus = fmt.Sprintf("RCode: %s", dns.RcodeToString[resp.Rcode])
+			}
+		} else if len(vec.RawBytes) > 0 {
+			conn, err := net.DialTimeout("udp", address, 2*time.Second)
+			if err == nil {
+				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write(vec.RawBytes)
+				buf := make([]byte, 512)
+				n, errRead := conn.Read(buf)
+				if errRead == nil && n > 0 {
+					respStatus = fmt.Sprintf("RAW RECV %d BYTES", n)
+				}
+				_ = conn.Close()
+			}
+		}
+
+		// Perform post-fuzz health check with valid query
+		time.Sleep(200 * time.Millisecond)
+		probeRes, probeErr := engine.Execute(ctx, target, models.DNSQuery{Domain: "example.com.", QueryType: "A", Protocol: "udp"})
+
+		healthText := "PASSED (SERVER ALIVE)"
+		if probeErr != nil || probeRes.RCode != 0 {
+			healthText = "FAILED (PROCESS UNRESPONSIVE)"
+			targetCrashed = true
+			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Post-fuzz health check FAILED after vector: %s! Server is unresponsive."}`, vec.Name)))
+		} else {
+			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] Post-fuzz health check passed (Latency: %.2f ms)."}`, probeRes.LatencyMS)))
+		}
+
+		vectorResults = append(vectorResults, vectorResult{
+			Category:       vec.Category,
+			Name:           vec.Name,
+			ResponseStatus: respStatus,
+			HealthCheck:    healthText,
+		})
+	}
+
+	statusText := "EXCELLENT (CRASH RESILIENT)"
+	if targetCrashed {
+		score = 0
+		statusText = "CRITICAL VULNERABILITY (SERVER CRASH / UNRESPONSIVE)"
+	}
+
+	result := map[string]any{
+		"domain":            domain,
+		"vectors_tested":    len(vectors),
+		"target_crashed":    targetCrashed,
+		"status_summary":    statusText,
+		"fuzzing_results":   vectorResults,
 	}
 
 	return score, result, nil

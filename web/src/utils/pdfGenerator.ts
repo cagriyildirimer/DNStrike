@@ -76,7 +76,19 @@ export function generatePdfReport(test: TestRun) {
   let alertTitle = 'SECURE CONFIGURATION';
   let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
 
-  if (test.scenario === 'zone-transfer-audit') {
+  if (test.scenario === 'dns-fuzzing') {
+    if (test.result?.target_crashed === true) {
+      alertBg = [254, 242, 242];
+      alertBorder = [239, 68, 68];
+      alertTitleColor = [185, 28, 28];
+      alertTextColor = [127, 29, 29];
+      alertTitle = 'CRITICAL VULNERABILITY (SERVER PROCESS CRASH)';
+      alertText = 'The DNS server crashed or froze during malformed packet fuzzing vectors. Upgrade DNS software and enforce strict UDP packet parsing checks.';
+    } else {
+      alertTitle = 'EXCELLENT FUZZING RESILIENCE';
+      alertText = 'The DNS server successfully handled malformed packet vectors without process crashes or service degradation.';
+    }
+  } else if (test.scenario === 'zone-transfer-audit') {
     const leaked = Number(test.result?.total_leaked_records ?? 0);
     if (leaked > 0) {
       alertBg = [254, 242, 242];

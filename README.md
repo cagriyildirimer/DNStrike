@@ -31,6 +31,15 @@ DNStrike offers specialized attack simulations, resilience benchmarks, and secur
 
 ---
 
+### 3. 💣 DNS Fuzzing & Malformed Packet Test (`dns-fuzzing`)
+* **Category / Kategori:** `audit`
+* **Risk Level:** `HIGH`
+* **Config Parameters:** `domain` (Default: `example.com`)
+* **Description (EN):** Evaluates DNS server crash resilience and memory stability under malformed UDP frames across 5 vector categories (reserved opcodes, single label length overflow >63 chars, raw header byte truncation, invalid EDNS0 version/options, and invalid QTYPE/QCLASS mutators). Fires a real-time post-fuzz health check after each vector.
+* **Açıklama (TR):** Hedef DNS sunucusuna 5 farklı kategoride bozuk/malformed UDP paketleri (Rezerve opcode, etiket taşması >63 karakter, kesilmiş ham başlıklar, geçersiz EDNS0 versiyonu ve sınıf mutasyonları) göndererek sunucu sürecinin çöküp çökmediğini (Crash Resilience) anlık sağlık kontrolleriyle denetler.
+
+---
+
 ### 2. 🚀 DNS Amplification & RRL Audit (`amplification-audit`)
 * **Category / Kategori:** `audit`
 * **Risk Level:** `MEDIUM`

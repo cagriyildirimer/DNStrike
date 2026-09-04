@@ -243,7 +243,64 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && (
+          {test.result && test.scenario === 'dns-fuzzing' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={16} style={{ color: test.result.target_crashed ? 'var(--accent-red)' : 'var(--accent-green)' }} /> DNS Fuzzing & Malformed Packet Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>VECTORS TESTED</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.vectors_tested)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>PROCESS RESILIENCE</span>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: test.result.target_crashed ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {test.result.target_crashed ? 'CRITICAL (UNRESPONSIVE)' : 'STABLE (RESILIENT)'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>STATUS SUMMARY</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: test.result.target_crashed ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+
+              {Boolean(test.result.fuzzing_results) && (
+                <div className="table-responsive" style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', marginBottom: '2.5rem' }}>
+                  <table style={{ margin: 0 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: '0.75rem 1rem' }}>Category</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Fuzz Vector Name</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Server Response</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Post-Fuzz Health Check</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(test.result.fuzzing_results as Array<Record<string, unknown>>).map((vec, idx) => (
+                        <tr key={idx}>
+                          <td style={{ padding: '0.75rem 1rem', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>{String(vec.category)}</td>
+                          <td style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>{String(vec.name)}</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace', fontSize: '0.85rem' }}>{String(vec.response_status)}</td>
+                          <td style={{ padding: '0.75rem 1rem' }}>
+                            <span className={`pill ${String(vec.health_check).includes('PASSED') ? 'pill-completed' : 'pill-failed'}`}>
+                              {String(vec.health_check)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results
