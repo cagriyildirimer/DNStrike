@@ -21,25 +21,6 @@ React UI → Gin REST API → Target service → SQLite
 
 Business rules live outside HTTP handlers. Shared JSON contracts are defined in `pkg/models`; matching TypeScript contracts are in `web/src/types.ts`. The SQLite migration includes the planned target, test, result, metric, finding, report, profile, and settings tables.
 
-## Local development
-
-Requires Go 1.24+, Node.js 24, and npm.
-
-```bash
-go mod download
-cd web && npm install && cd ..
-go run ./cmd/server
-```
-
-The embedded production UI is at <http://127.0.0.1:8080>. For hot reload, run `npm run dev` in `web`; Vite proxies `/api` and `/ws` to Go.
-
-```bash
-make test
-make build
-```
-
-The frontend build is written to `internal/webui/dist` and embedded in the Go binary with `go:embed`.
-
 ## Docker
 
 ```bash
