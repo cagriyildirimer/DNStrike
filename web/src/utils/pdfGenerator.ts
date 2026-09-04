@@ -76,7 +76,19 @@ export function generatePdfReport(test: TestRun) {
   let alertTitle = 'SECURE CONFIGURATION';
   let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
 
-  if (test.scenario === 'security-audit') {
+  if (test.scenario === 'tcp-slowloris') {
+    if (test.result?.legitimate_tcp_served === false) {
+      alertBg = [254, 242, 242];
+      alertBorder = [239, 68, 68];
+      alertTitleColor = [185, 28, 28];
+      alertTextColor = [127, 29, 29];
+      alertTitle = 'HIGH VULNERABILITY (TCP DoS DETECTED)';
+      alertText = 'The DNS server failed to serve legitimate TCP queries while TCP sockets were held open. The server lacks TCP socket connection pooling or idle timeout protection.';
+    } else {
+      alertTitle = 'EXCELLENT TCP RESILIENCE';
+      alertText = 'The DNS server successfully served legitimate TCP queries under socket exhaustion pressure.';
+    }
+  } else if (test.scenario === 'security-audit') {
     if (score < 50) {
       alertBg = [254, 242, 242];
       alertBorder = [239, 68, 68];

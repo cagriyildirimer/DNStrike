@@ -33,6 +33,17 @@ DNStrike offers specialized attack simulations, resilience benchmarks, and secur
 
 ---
 
+### 3. 🐢 DNS TCP Slowloris / Connection Exhaustion (`tcp-slowloris`)
+* **Category / Kategori:** `volume`
+* **Risk Level:** `HIGH`
+* **Config Parameters:** `connections` (Default: 20), `hold_duration` (Default: 10s)
+* **Description (EN):** Evaluates DNS TCP Port 53 socket exhaustion handling:
+  1. Opens concurrent slow TCP connections sending partial 2-byte DNS headers and periodic heartbeat bytes.
+  2. Probes the target server with a parallel legitimate TCP DNS query to verify if connection exhaustion blocks authorized traffic or if TCP idle timeouts are properly enforced.
+* **Açıklama (TR):** TCP Port 53 üzerinden eşzamanlı yavaş TCP soketleri açarak sunucunun maksimum TCP bağlantı limitini, soket zaman aşımı (Timeout) politikasını ve DoS saldırısı altındayken yasal TCP sorgularına yanıt verip vermediğini test eder.
+
+---
+
 ### 3. 📊 Performance Benchmark (`benchmark`)
 * **Category / Kategori:** `performance`
 * **Risk Level:** `MEDIUM`

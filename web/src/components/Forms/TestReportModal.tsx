@@ -162,7 +162,35 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && (
+          {test.result && test.scenario === 'tcp-slowloris' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Zap size={16} style={{ color: 'var(--accent-red)' }} /> TCP Slowloris & Connection Exhaustion Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>ESTABLISHED SOCKETS</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.connections_established)} / {String(test.result.connections_requested)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>LEGITIMATE PROBE</span>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: test.result.legitimate_tcp_served ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {test.result.legitimate_tcp_served ? 'PASSED (SERVED)' : 'FAILED (BLOCKED)'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>RESILIENCE SUMMARY</span>
+                  <span style={{ fontSize: '1rem', fontWeight: 700, color: test.result.legitimate_tcp_served ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results
