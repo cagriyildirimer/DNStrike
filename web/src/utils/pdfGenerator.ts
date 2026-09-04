@@ -76,7 +76,20 @@ export function generatePdfReport(test: TestRun) {
   let alertTitle = 'SECURE CONFIGURATION';
   let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
 
-  if (test.scenario === 'dns-fuzzing') {
+  if (test.scenario === 'subdomain-takeover') {
+    const vulnCount = Number(test.result?.vulnerable_count ?? 0);
+    if (vulnCount > 0) {
+      alertBg = [254, 242, 242];
+      alertBorder = [239, 68, 68];
+      alertTitleColor = [185, 28, 28];
+      alertTextColor = [127, 29, 29];
+      alertTitle = 'HIGH RISK (SUBDOMAINS VULNERABLE TO TAKEOVER)';
+      alertText = `Found ${vulnCount} dangling CNAME records pointing to decommissioned cloud providers (AWS, GitHub Pages, Heroku, Azure). Immediate action required: remove orphaned CNAMEs or claim backend resources.`;
+    } else {
+      alertTitle = 'NO DANGLING CNAMEs DETECTED';
+      alertText = 'All scanned CNAME records resolve safely to active backend targets. No subdomain takeover vectors detected.';
+    }
+  } else if (test.scenario === 'dns-fuzzing') {
     if (test.result?.target_crashed === true) {
       alertBg = [254, 242, 242];
       alertBorder = [239, 68, 68];

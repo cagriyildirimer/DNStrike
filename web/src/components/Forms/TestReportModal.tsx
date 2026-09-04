@@ -300,7 +300,64 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && (
+          {test.result && test.scenario === 'subdomain-takeover' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={16} style={{ color: (test.result.vulnerable_count as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }} /> Subdomain Takeover & Dangling CNAME Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SUBDOMAINS SCANNED</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.subdomains_scanned)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>DANGLING CNAMEs</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: (test.result.vulnerable_count as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.vulnerable_count)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SECURITY SUMMARY</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: (test.result.vulnerable_count as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+
+              {Boolean(test.result.scan_results) && (test.result.scan_results as Array<unknown>).length > 0 && (
+                <div className="table-responsive" style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', marginBottom: '2.5rem' }}>
+                  <table style={{ margin: 0 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: '0.75rem 1rem' }}>Subdomain</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>CNAME Target</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Cloud Provider</th>
+                        <th style={{ padding: '0.75rem 1rem' }}>Vulnerability Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(test.result.scan_results as Array<Record<string, unknown>>).map((item, idx) => (
+                        <tr key={idx}>
+                          <td style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>{String(item.subdomain)}</td>
+                          <td style={{ padding: '0.75rem 1rem', fontFamily: 'monospace', fontSize: '0.85rem' }}>{String(item.cname_target)}</td>
+                          <td style={{ padding: '0.75rem 1rem', fontSize: '0.85rem' }}>{String(item.cloud_provider)}</td>
+                          <td style={{ padding: '0.75rem 1rem' }}>
+                            <span className={`pill ${String(item.status).includes('VULNERABLE') ? 'pill-failed' : 'pill-completed'}`}>
+                              {String(item.status)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && test.scenario !== 'subdomain-takeover' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results

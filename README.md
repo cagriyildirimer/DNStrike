@@ -40,6 +40,15 @@ DNStrike offers specialized attack simulations, resilience benchmarks, and secur
 
 ---
 
+### 4. 🎯 Subdomain Takeover / Dangling CNAME Scanner (`subdomain-takeover`)
+* **Category / Kategori:** `audit`
+* **Risk Level:** `LOW`
+* **Config Parameters:** `domain` (Default: `example.com`), `subdomains` (Default list: `api`, `dev`, `stage`, `blog`, `shop`, `app`, `docs`, `status`, `mail`, `cdn`)
+* **Description (EN):** Scans subdomain CNAME records to detect pointers to decommissioned external cloud services (AWS S3, GitHub Pages, Heroku, Azure, Vercel, Netlify, Shopify) returning `NXDOMAIN` (dangling CNAME pointers vulnerable to subdomain takeover).
+* **Açıklama (TR):** Alt alan adlarının CNAME kayıtlarını sorgulayarak bulut servislerine (AWS S3, GitHub Pages, Heroku, Azure, Vercel, Netlify vb.) işaret eden fakat hedefin silinmesi nedeniyle sarkan/boşta kalan kayıtları (`NXDOMAIN` dönen Dangling CNAME) ve Subdomain Takeover zafiyetlerini tespit eder.
+
+---
+
 ### 2. 🚀 DNS Amplification & RRL Audit (`amplification-audit`)
 * **Category / Kategori:** `audit`
 * **Risk Level:** `MEDIUM`

@@ -149,6 +149,8 @@ func (o *Orchestrator) executeTest(id int64) {
 			score, result, execErr = o.runZoneTransferAuditScenario(ctx, test, target, meta, config)
 		} else if meta.ID == "dns-fuzzing" {
 			score, result, execErr = o.runDNSFuzzingScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "subdomain-takeover" {
+			score, result, execErr = o.runSubdomainTakeoverScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
@@ -1164,6 +1166,130 @@ func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Te
 		"target_crashed":    targetCrashed,
 		"status_summary":    statusText,
 		"fuzzing_results":   vectorResults,
+	}
+
+	return score, result, nil
+}
+
+// Subdomain Takeover / Dangling CNAME Scanner Logic
+func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	subdomains := []string{"api", "dev", "stage", "blog", "shop", "app", "docs", "status", "mail", "cdn"}
+	if rawSubs, ok := config["subdomains"].([]any); ok && len(rawSubs) > 0 {
+		subdomains = make([]string, 0, len(rawSubs))
+		for _, s := range rawSubs {
+			if str, isStr := s.(string); isStr && str != "" {
+				subdomains = append(subdomains, str)
+			}
+		}
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Subdomain Takeover & Dangling CNAME Scanner for %s (%d subdomains)..."}`, domain, len(subdomains))))
+
+	cloudSignatures := map[string]string{
+		"github.io":          "GitHub Pages",
+		"s3.amazonaws.com":   "AWS S3 Bucket",
+		"herokuapp.com":      "Heroku App",
+		"azurewebsites.net":  "Azure Web App",
+		"cloudapp.net":       "Azure Cloud App",
+		"vercel.app":         "Vercel Deployment",
+		"vercel-dns.com":     "Vercel DNS",
+		"netlify.app":        "Netlify Site",
+		"myshopify.com":      "Shopify Store",
+		"wordpress.com":      "WordPress Site",
+	}
+
+	type cnameItem struct {
+		Subdomain     string `json:"subdomain"`
+		CnameTarget   string `json:"cname_target"`
+		CloudProvider string `json:"cloud_provider"`
+		Status        string `json:"status"`
+	}
+
+	var results []cnameItem
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	vulnerableCount := 0
+	cnameFoundCount := 0
+
+	udpClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+
+	for idx, sub := range subdomains {
+		fqdn := fmt.Sprintf("%s.%s", sub, domain)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/%d] Scanning %s for CNAME records..."}`, idx+1, len(subdomains), fqdn)))
+
+		// Query CNAME record via dns client
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(fqdn), dns.TypeCNAME)
+		resp, _, err := udpClient.ExchangeContext(ctx, m, address)
+
+		if err == nil && resp != nil && resp.Rcode == dns.RcodeSuccess {
+			cnameTarget := ""
+			for _, rr := range resp.Answer {
+				if cnameRR, ok := rr.(*dns.CNAME); ok {
+					cnameTarget = strings.TrimSuffix(cnameRR.Target, ".")
+					break
+				}
+			}
+
+			if cnameTarget != "" {
+				cnameFoundCount++
+				detectedProvider := "Unknown External"
+				for sig, providerName := range cloudSignatures {
+					if strings.Contains(strings.ToLower(cnameTarget), sig) {
+						detectedProvider = providerName
+						break
+					}
+				}
+
+				// Check if the CNAME target resolves or returns NXDOMAIN/Timeout (Dangling pointer)
+				targetRes, targetErr := engine.Execute(ctx, target, models.DNSQuery{Domain: cnameTarget, QueryType: "A", Protocol: "udp"})
+
+				isDangling := targetErr != nil || targetRes.RCode == 3 // NXDOMAIN
+
+				itemStatus := "SAFE (RESOLVING)"
+				if isDangling {
+					vulnerableCount++
+					itemStatus = "VULNERABLE (DANGLING CNAME)"
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Dangling CNAME detected on %s -> %s (%s)! Target returns NXDOMAIN."}`, fqdn, cnameTarget, detectedProvider)))
+				} else {
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] CNAME found for %s -> %s (%s). Target resolves normally."}`, fqdn, cnameTarget, detectedProvider)))
+				}
+
+				results = append(results, cnameItem{
+					Subdomain:     fqdn,
+					CnameTarget:   cnameTarget,
+					CloudProvider: detectedProvider,
+					Status:        itemStatus,
+				})
+			}
+		}
+	}
+
+	score := 100
+	statusText := "SECURE (NO DANGLING CNAMEs)"
+
+	if vulnerableCount > 0 {
+		score = 100 - (vulnerableCount * 40)
+		if score < 0 {
+			score = 0
+		}
+		statusText = fmt.Sprintf("HIGH RISK (%d DANGLING CNAMEs FOUND)", vulnerableCount)
+	} else if cnameFoundCount == 0 {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Scan completed. No CNAME records were found for tested subdomains."}`))
+	}
+
+	result := map[string]any{
+		"domain":             domain,
+		"subdomains_scanned": len(subdomains),
+		"cnames_found":       cnameFoundCount,
+		"vulnerable_count":   vulnerableCount,
+		"status_summary":     statusText,
+		"scan_results":       results,
 	}
 
 	return score, result, nil
