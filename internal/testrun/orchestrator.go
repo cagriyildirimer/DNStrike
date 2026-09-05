@@ -13,10 +13,59 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/dnstrike/dnstrike/internal/dnsengine"
+	"github.com/dnstrike/dnstrike/internal/metrics"
 	"github.com/dnstrike/dnstrike/internal/scenarios"
 	ws "github.com/dnstrike/dnstrike/internal/websocket"
 	"github.com/dnstrike/dnstrike/pkg/models"
 )
+
+type axfrRecord struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+func performAXFR(target models.Target, domain string, timeout time.Duration) ([]axfrRecord, map[string]int, int, bool, string) {
+	recordCounts := make(map[string]int)
+	if !target.TCPEnabled {
+		return nil, recordCounts, 0, true, "TCP is disabled on target"
+	}
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	transfer := new(dns.Transfer)
+	transfer.ReadTimeout = timeout
+
+	m := new(dns.Msg)
+	m.SetAxfr(dns.Fqdn(domain))
+
+	ch, err := transfer.In(m, address)
+	if err != nil {
+		return nil, recordCounts, 0, true, err.Error()
+	}
+
+	var records []axfrRecord
+	totalLeaked := 0
+
+	for env := range ch {
+		if env.Error != nil {
+			return records, recordCounts, totalLeaked, true, env.Error.Error()
+		}
+		for _, rr := range env.RR {
+			totalLeaked++
+			header := rr.Header()
+			recType := dns.TypeToString[header.Rrtype]
+			recordCounts[recType]++
+
+			if len(records) < 50 {
+				records = append(records, axfrRecord{
+					Name:  header.Name,
+					Type:  recType,
+					Value: strings.TrimSpace(strings.TrimPrefix(rr.String(), header.String())),
+				})
+			}
+		}
+	}
+	return records, recordCounts, totalLeaked, false, ""
+}
 
 type Orchestrator struct {
 	tests     *Service
@@ -196,7 +245,8 @@ func (o *Orchestrator) failTest(id int64, reason string) {
 	if err != nil {
 		slog.Error("orchestrator failed to mark failed", "test_id", id, "error", err)
 	}
-	o.hub.Broadcast(fmt.Sprintf("%d", id), []byte(fmt.Sprintf(`{"type":"failed","reason":"%s"}`, reason)))
+	msg, _ := json.Marshal(map[string]string{"type": "failed", "reason": reason})
+	o.hub.Broadcast(fmt.Sprintf("%d", id), msg)
 }
 
 // Security Audit Logic
@@ -228,37 +278,20 @@ func (o *Orchestrator) runAuditScenario(ctx context.Context, test models.Test, t
 
 	// 3. AXFR (Zone Transfer)
 	domain := "example.com"
-	if val, ok := config["domain"].(string); ok {
+	if val, ok := config["domain"].(string); ok && val != "" {
 		domain = val
 	}
 	
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[3/3] Attempting AXFR zone transfer for domain: %s"}`, domain)))
 	
-	if target.TCPEnabled {
-		transfer := new(dns.Transfer)
-		address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
-		m := new(dns.Msg)
-		m.SetAxfr(dns.Fqdn(domain))
-		
-		ch, err := transfer.In(m, address)
-		if err == nil {
-			leaked := 0
-			for env := range ch {
-				if env.Error == nil {
-					leaked += len(env.RR)
-				}
-			}
-			if leaked > 0 {
-				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] AXFR Successful! Leaked %d zone records."}`, leaked)))
-				score -= 40
-			} else {
-				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR attempted but no records were returned."}`))
-			}
-		} else {
-			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR connection refused or timed out."}`))
-		}
+	_, _, leaked, failed, errStr := performAXFR(target, domain, 5*time.Second)
+	if !failed && leaked > 0 {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] AXFR Successful! Leaked %d zone records."}`, leaked)))
+		score -= 40
+	} else if failed {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] AXFR connection refused or timed out (%s)."}`, errStr)))
 	} else {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[SKIPPED] AXFR requires TCP, which is disabled on this target."}`))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR attempted but no records were returned."}`))
 	}
 
 	if score < 0 {
@@ -529,53 +562,70 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 
 	results := pool.Run(runCtx, target, jobs)
 	
-	var total, errors, loss int
-	var latencyTotal float64
-
+	collector := metrics.NewCollector(8192)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for {
+	doneLoop := false
+	for !doneLoop {
 		select {
 		case <-runCtx.Done():
-			// Drain remaining
-			for range results {}
-			score := 100
-			if total > 0 {
-				errorRate := float64(errors) / float64(total)
-				score = 100 - int(errorRate*100)
-			}
-			result := map[string]any{
-				"total_queries": total,
-				"errors": errors,
-				"loss": loss,
-				"success": total - errors,
-			}
-			if total > 0 {
-				result["avg_latency_ms"] = latencyTotal / float64(total)
-			}
-			return score, result, nil
+			doneLoop = true
 		case res, ok := <-results:
 			if !ok {
-				continue
+				doneLoop = true
+				break
 			}
-			total++
-			latencyTotal += res.LatencyMS
-			if res.ErrorClass != "" {
-				errors++
-				if res.ErrorClass == models.QueryTimeout {
-					loss++
-				}
-			}
+			collector.Record(res)
 		case <-ticker.C:
-			// Send realtime metric snapshot
-			if total > 0 {
-				avg := latencyTotal / float64(total)
-				snap := fmt.Sprintf(`{"type":"metric","elapsed":1,"qps":%d,"errors":%d,"loss":%d,"avg_latency_ms":%.2f}`, total, errors, loss, avg)
-				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(snap))
+			snap := collector.Snapshot(time.Now())
+			if snap.TotalQueries > 0 {
+				data, _ := json.Marshal(map[string]any{
+					"type":           "metric",
+					"elapsed":        snap.ElapsedSeconds,
+					"qps":            snap.CurrentQPS,
+					"total_queries":  snap.TotalQueries,
+					"errors":         snap.Errors,
+					"loss":           snap.Timeouts,
+					"avg_latency_ms": snap.AverageLatencyMS,
+					"p50_latency_ms": snap.P50LatencyMS,
+					"p99_latency_ms": snap.P99LatencyMS,
+				})
+				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), data)
 			}
 		}
 	}
+
+	if results != nil {
+		for res := range results {
+			collector.Record(res)
+		}
+	}
+
+	snap := collector.Snapshot(time.Now())
+	score := 100
+	if snap.TotalQueries > 0 {
+		errorRate := float64(snap.Errors) / float64(snap.TotalQueries)
+		score = 100 - int(errorRate*100)
+		if score < 0 {
+			score = 0
+		}
+	}
+
+	result := map[string]any{
+		"total_queries":  snap.TotalQueries,
+		"errors":         snap.Errors,
+		"loss":           snap.Timeouts,
+		"success":        snap.TotalResponses,
+		"avg_latency_ms": snap.AverageLatencyMS,
+		"p50_latency_ms": snap.P50LatencyMS,
+		"p90_latency_ms": snap.P90LatencyMS,
+		"p95_latency_ms": snap.P95LatencyMS,
+		"p99_latency_ms": snap.P99LatencyMS,
+		"rcodes":         snap.ResponseCodes,
+	}
+
+	return score, result, nil
 }
 
 // QPS Ramp Scenario
@@ -649,9 +699,7 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 
 		results := pool.Run(stepCtx, target, jobs)
 		
-		var stepTotal, stepErrors, stepLoss int
-		var latencyTotal float64
-
+		stepCollector := metrics.NewCollector(4096)
 		ticker := time.NewTicker(1 * time.Second)
 		
 	drainLoop:
@@ -659,32 +707,39 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 			select {
 			case <-stepCtx.Done():
 				ticker.Stop()
-				cancel()
-				// Drain remaining
-				for range results {
-					stepTotal++
+				if results != nil {
+					for res := range results {
+						stepCollector.Record(res)
+					}
 				}
 				break drainLoop
 			case res, ok := <-results:
 				if !ok {
-					continue
+					ticker.Stop()
+					break drainLoop
 				}
-				stepTotal++
-				latencyTotal += res.LatencyMS
-				if res.ErrorClass != "" {
-					stepErrors++
-					if res.ErrorClass == models.QueryTimeout {
-						stepLoss++
-					}
-				}
+				stepCollector.Record(res)
 			case <-ticker.C:
-				if stepTotal > 0 {
-					avg := latencyTotal / float64(stepTotal)
-					snap := fmt.Sprintf(`{"type":"metric","elapsed":1,"qps":%d,"errors":%d,"loss":%d,"avg_latency_ms":%.2f}`, stepTotal, stepErrors, stepLoss, avg)
-					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(snap))
+				snap := stepCollector.Snapshot(time.Now())
+				if snap.TotalQueries > 0 {
+					data, _ := json.Marshal(map[string]any{
+						"type":           "metric",
+						"step_qps":       currentQps,
+						"qps":            snap.CurrentQPS,
+						"total_queries":  snap.TotalQueries,
+						"errors":         snap.Errors,
+						"loss":           snap.Timeouts,
+						"avg_latency_ms": snap.AverageLatencyMS,
+					})
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), data)
 				}
 			}
 		}
+		cancel()
+
+		stepSnap := stepCollector.Snapshot(time.Now())
+		stepTotal := int(stepSnap.TotalQueries)
+		stepErrors := int(stepSnap.Errors)
 		
 		// Evaluate step
 		errorRate := 0.0
@@ -784,51 +839,70 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 
 	results := pool.Run(runCtx, target, jobs)
 	
-	var total, errors, loss int
-	var latencyTotal float64
-
+	collector := metrics.NewCollector(8192)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for {
+	doneLoop := false
+	for !doneLoop {
 		select {
 		case <-runCtx.Done():
-			for range results {}
-			score := 100
-			if total > 0 {
-				errorRate := float64(errors) / float64(total)
-				score = 100 - int(errorRate*100)
-			}
-			result := map[string]any{
-				"total_queries": total,
-				"errors": errors,
-				"loss": loss,
-				"success": total - errors,
-			}
-			if total > 0 {
-				result["avg_latency_ms"] = latencyTotal / float64(total)
-			}
-			return score, result, nil
+			doneLoop = true
 		case res, ok := <-results:
 			if !ok {
-				continue
+				doneLoop = true
+				break
 			}
-			total++
-			latencyTotal += res.LatencyMS
-			if res.ErrorClass != "" {
-				errors++
-				if res.ErrorClass == models.QueryTimeout {
-					loss++
-				}
-			}
+			collector.Record(res)
 		case <-ticker.C:
-			if total > 0 {
-				avg := latencyTotal / float64(total)
-				snap := fmt.Sprintf(`{"type":"metric","elapsed":1,"qps":%d,"errors":%d,"loss":%d,"avg_latency_ms":%.2f}`, total, errors, loss, avg)
-				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(snap))
+			snap := collector.Snapshot(time.Now())
+			if snap.TotalQueries > 0 {
+				data, _ := json.Marshal(map[string]any{
+					"type":           "metric",
+					"elapsed":        snap.ElapsedSeconds,
+					"qps":            snap.CurrentQPS,
+					"total_queries":  snap.TotalQueries,
+					"errors":         snap.Errors,
+					"loss":           snap.Timeouts,
+					"avg_latency_ms": snap.AverageLatencyMS,
+					"p50_latency_ms": snap.P50LatencyMS,
+					"p99_latency_ms": snap.P99LatencyMS,
+				})
+				o.hub.Broadcast(fmt.Sprintf("%d", test.ID), data)
 			}
 		}
 	}
+
+	if results != nil {
+		for res := range results {
+			collector.Record(res)
+		}
+	}
+
+	snap := collector.Snapshot(time.Now())
+	score := 100
+	if snap.TotalQueries > 0 {
+		errorRate := float64(snap.Errors) / float64(snap.TotalQueries)
+		score = 100 - int(errorRate*100)
+		if score < 0 {
+			score = 0
+		}
+	}
+
+	result := map[string]any{
+		"total_queries":  snap.TotalQueries,
+		"errors":         snap.Errors,
+		"loss":           snap.Timeouts,
+		"success":        snap.TotalResponses,
+		"avg_latency_ms": snap.AverageLatencyMS,
+		"p50_latency_ms": snap.P50LatencyMS,
+		"p90_latency_ms": snap.P90LatencyMS,
+		"p95_latency_ms": snap.P95LatencyMS,
+		"p99_latency_ms": snap.P99LatencyMS,
+		"rcodes":         snap.ResponseCodes,
+	}
+
+	return score, result, nil
 }
 
 // DNS TCP Slowloris / Connection Exhaustion Logic
@@ -942,13 +1016,18 @@ func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.
 		score = 0
 	}
 
+	probeLatency := any(nil)
+	if probeErr == nil {
+		probeLatency = probeRes.LatencyMS
+	}
+
 	result := map[string]any{
 		"connections_requested":  connections,
 		"connections_established": established,
 		"connections_dropped":    dropped,
 		"hold_duration_seconds":  holdDuration,
 		"legitimate_tcp_served":  legitimateServed,
-		"probe_latency_ms":       probeRes.LatencyMS,
+		"probe_latency_ms":       probeLatency,
 		"status_summary":         statusText,
 	}
 
@@ -968,56 +1047,10 @@ func (o *Orchestrator) runZoneTransferAuditScenario(ctx context.Context, test mo
 		return 0, nil, fmt.Errorf("target TCP port 53 is disabled in target configuration (AXFR requires TCP)")
 	}
 
-	type leakedRecord struct {
-		Name  string `json:"name"`
-		Type  string `json:"type"`
-		Value string `json:"value"`
-	}
-
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
-
-	transfer := new(dns.Transfer)
-	transfer.ReadTimeout = 5 * time.Second
-
-	m := new(dns.Msg)
-	m.SetAxfr(dns.Fqdn(domain))
-
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/2] Connecting to %s via TCP 53 and requesting AXFR for %s..."}`, address, domain)))
 
-	ch, err := transfer.In(m, address)
-
-	var records []leakedRecord
-	recordCounts := make(map[string]int)
-	totalLeaked := 0
-	transferFailed := false
-	errMessage := ""
-
-	if err != nil {
-		transferFailed = true
-		errMessage = err.Error()
-	} else {
-		for env := range ch {
-			if env.Error != nil {
-				transferFailed = true
-				errMessage = env.Error.Error()
-				break
-			}
-			for _, rr := range env.RR {
-				totalLeaked++
-				header := rr.Header()
-				recType := dns.TypeToString[header.Rrtype]
-				recordCounts[recType]++
-
-				if len(records) < 50 {
-					records = append(records, leakedRecord{
-						Name:  header.Name,
-						Type:  recType,
-						Value: strings.TrimSpace(strings.TrimPrefix(rr.String(), header.String())),
-					})
-				}
-			}
-		}
-	}
+	records, recordCounts, totalLeaked, transferFailed, errMessage := performAXFR(target, domain, 5*time.Second)
 
 	score := 100
 	statusText := "SECURE (TRANSFER REFUSED)"

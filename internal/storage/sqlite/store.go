@@ -134,7 +134,13 @@ func (s *Store) GetTarget(ctx context.Context, id int64) (models.Target, error) 
 }
 
 func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT id FROM tests WHERE target_id=?", id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM tests WHERE target_id=?", id)
 	if err == nil {
 		var testIDs []string
 		for rows.Next() {
@@ -146,23 +152,36 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 		rows.Close()
 		if len(testIDs) > 0 {
 			inClause := strings.Join(testIDs, ",")
-			s.db.ExecContext(ctx, "DELETE FROM test_results WHERE test_id IN ("+inClause+")")
-			s.db.ExecContext(ctx, "DELETE FROM metrics WHERE test_id IN ("+inClause+")")
-			s.db.ExecContext(ctx, "DELETE FROM findings WHERE test_id IN ("+inClause+")")
-			s.db.ExecContext(ctx, "DELETE FROM reports WHERE test_id IN ("+inClause+")")
-			s.db.ExecContext(ctx, "DELETE FROM tests WHERE target_id=?", id)
+			if _, err := tx.ExecContext(ctx, "DELETE FROM test_results WHERE test_id IN ("+inClause+")"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM metrics WHERE test_id IN ("+inClause+")"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM findings WHERE test_id IN ("+inClause+")"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM reports WHERE test_id IN ("+inClause+")"); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM tests WHERE target_id=?", id); err != nil {
+				return err
+			}
 		}
 	}
 
-	r, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id=?`, id)
+	r, err := tx.ExecContext(ctx, `DELETE FROM targets WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
-	n, _ := r.RowsAffected()
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 type scanner interface{ Scan(...any) error }

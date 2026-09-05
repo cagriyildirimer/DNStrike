@@ -17,6 +17,7 @@ import (
 var queryTypes = map[string]uint16{
 	"A": dns.TypeA, "AAAA": dns.TypeAAAA, "MX": dns.TypeMX, "TXT": dns.TypeTXT, "NS": dns.TypeNS,
 	"PTR": dns.TypePTR, "SRV": dns.TypeSRV, "CNAME": dns.TypeCNAME, "DNSKEY": dns.TypeDNSKEY, "DS": dns.TypeDS,
+	"ANY": dns.TypeANY, "SOA": dns.TypeSOA,
 }
 
 type QueryEngine struct{ Timeout time.Duration }

@@ -6,6 +6,7 @@ import { api } from './api';
 import type { DiscoveryProfile, Target, TargetInput } from './types';
 
 import { Sidebar } from './components/Layout/Sidebar';
+import { DashboardPage } from './pages/Dashboard';
 import { TargetsPage } from './pages/Targets';
 import { TestListPage } from './pages/Tests';
 import { PlaceholderPage } from './pages/Placeholder';
@@ -75,6 +76,10 @@ export default function App() {
         
         <Routes>
           <Route 
+            path="/dashboard" 
+            element={<DashboardPage targets={targetItems} tests={testItems} />} 
+          />
+          <Route 
             path="/targets" 
             element={
               <TargetsPage 
@@ -127,7 +132,7 @@ export default function App() {
               />
             } 
           />
-          <Route path="*" element={<Navigate to="/targets" replace />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
 

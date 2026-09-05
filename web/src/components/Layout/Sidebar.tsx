@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Radar, Server, Zap, Activity, History, Settings, ShieldCheck } from 'lucide-react';
+import { Radar, LayoutDashboard, Server, Zap, Activity, History, Settings, ShieldCheck } from 'lucide-react';
 
 interface NavProps {
   to: string;
@@ -33,6 +33,7 @@ export function Sidebar({ runningTestsCount }: { runningTestsCount: number }) {
       </div>
       
       <nav className="nav-menu">
+        <Nav to="/dashboard" icon={<LayoutDashboard size={20} />} label="Dashboard" />
         <Nav to="/targets" icon={<Server size={20} />} label="Targets" />
         <Nav to="/tests/new" icon={<Zap size={20} />} label="New Test" />
         <Nav to="/tests/running" icon={<Activity size={20} />} label="Running Tests" badge={runningTestsCount > 0 ? String(runningTestsCount) : undefined} />
