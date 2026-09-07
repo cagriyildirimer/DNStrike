@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal, Activity, AlertTriangle, ArrowRight } from 'lucide-react';
 
 interface LiveTerminalProps {
@@ -13,6 +13,13 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
   const [score, setScore] = useState<number | null>(null);
   
   const bottomRef = useRef<HTMLDivElement>(null);
+  const statusRef = useRef(status);
+
+  // Keep statusRef in sync with status state
+  const updateStatus = useCallback((newStatus: typeof status) => {
+    statusRef.current = newStatus;
+    setStatus(newStatus);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -29,7 +36,7 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      setStatus('RUNNING');
+      updateStatus('RUNNING');
       setLogs(prev => [...prev, `[SYSTEM] Connected to Orchestrator stream for Test #${testId}`]);
     };
     
@@ -50,15 +57,15 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
             });
             break;
           case 'status_change':
-            if (data.status === 'RUNNING') setStatus('RUNNING');
+            if (data.status === 'RUNNING') updateStatus('RUNNING');
             break;
           case 'completed':
-            setStatus('COMPLETED');
+            updateStatus('COMPLETED');
             if (data.score !== undefined) setScore(data.score);
             setLogs(prev => [...prev, `[SYSTEM] Test execution completed. Resilience Score: ${data.score}`]);
             break;
           case 'failed':
-            setStatus('FAILED');
+            updateStatus('FAILED');
             setLogs(prev => [...prev, `[SYSTEM ERROR] Test execution failed: ${data.reason}`]);
             break;
         }
@@ -69,11 +76,11 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
     
     ws.onerror = () => {
       setLogs(prev => [...prev, `[SYSTEM ERROR] WebSocket connection failed.`]);
-      setStatus('FAILED');
+      updateStatus('FAILED');
     };
     
     ws.onclose = () => {
-      if (status === 'RUNNING') {
+      if (statusRef.current === 'RUNNING') {
         setLogs(prev => [...prev, `[SYSTEM] Connection closed by server.`]);
       }
     };
@@ -86,7 +93,7 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [testId]);
 
-  const isBenchmark = scenario === 'benchmark' || scenario === 'nxdomain';
+  const hasLiveMetrics = ['benchmark', 'nxdomain', 'query-flood', 'random-subdomain', 'qps-ramp', 'water-torture'].includes(scenario);
 
   return (
     <div className="live-terminal-container">
@@ -100,7 +107,7 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
         </div>
       </div>
       
-      {isBenchmark && status !== 'CONNECTING' && (
+      {hasLiveMetrics && status !== 'CONNECTING' && (
         <div className="live-metrics-bar">
           <div className="live-metric">
             <span className="label">QPS Sent</span>

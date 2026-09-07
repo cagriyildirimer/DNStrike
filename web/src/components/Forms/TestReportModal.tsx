@@ -104,7 +104,7 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </table>
           </div>
 
-          {test.result && Boolean(test.result.amplification_results) && (
+          {test.result && test.scenario === 'amplification' && Boolean(test.result.amplification_results) && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Zap size={16} style={{ color: 'var(--accent-amber)' }} /> Amplification & RRL Analysis
@@ -418,7 +418,113 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </>
           )}
 
-          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && test.scenario !== 'subdomain-takeover' && test.scenario !== 'rrl-threshold' && (
+          {test.result && test.scenario === 'dns-tunneling' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={16} style={{ color: (test.result.delivered_chunks as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }} /> Covert DNS Tunneling & Exfiltration Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>DELIVERED CHUNKS</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: (test.result.delivered_chunks as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.delivered_chunks)} / {String(test.result.total_chunks)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SIPHONED DATA</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.total_bytes_sent)} Bytes
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>SECURITY POSTURE</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: (test.result.delivered_chunks as number) > 0 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {test.result && test.scenario === 'water-torture' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Zap size={16} style={{ color: 'var(--accent-amber)' }} /> Water Torture (Random Subdomain Flood) Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>TOTAL NXDOMAIN FLOOD</span>
+                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {String(test.result.nxdomain_count)} / {String(test.result.total_queries)}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>P99 LATENCY</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {Number(test.result.p99_latency_ms).toFixed(2)} ms
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>STATUS SUMMARY</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {test.result && test.scenario === 'ecs-manipulation' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <CheckCircle2 size={16} style={{ color: 'var(--accent-blue)' }} /> EDNS0 Client Subnet (ECS) Geo-Spoofing Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>ECS OPTION SUPPORT</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: test.result.ecs_supported ? 'var(--accent-green)' : 'var(--accent-amber)' }}>
+                    {test.result.ecs_supported ? 'SUPPORTED' : 'STRIPPED / IGNORED'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>POSTURE SUMMARY</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--accent-green)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {test.result && test.scenario === 'dnssec-audit' && (
+            <>
+              <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <CheckCircle2 size={16} style={{ color: test.result.dnskey_present ? 'var(--accent-green)' : 'var(--accent-amber)' }} /> DNSSEC Cryptographic Health Analysis
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>DNSKEY RECORD</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: test.result.dnskey_present ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {test.result.dnskey_present ? 'PRESENT' : 'MISSING'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>RRSIG SIGNATURES</span>
+                  <span style={{ fontSize: '1.25rem', fontWeight: 700, color: test.result.rrsig_present ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {test.result.rrsig_present ? 'VALIDATED' : 'MISSING'}
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>DNSSEC POSTURE</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: test.result.dnskey_present ? 'var(--accent-green)' : 'var(--accent-amber)' }}>
+                    {String(test.result.status_summary)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {test.result && Object.keys(test.result).length > 0 && !test.result.amplification_results && test.scenario !== 'tcp-slowloris' && test.scenario !== 'zone-transfer-audit' && test.scenario !== 'dns-fuzzing' && test.scenario !== 'subdomain-takeover' && test.scenario !== 'rrl-threshold' && test.scenario !== 'dns-tunneling' && test.scenario !== 'water-torture' && test.scenario !== 'ecs-manipulation' && test.scenario !== 'dnssec-audit' && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <CheckCircle2 size={16} style={{ color: 'var(--accent-green)' }} /> Execution Results

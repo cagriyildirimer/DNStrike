@@ -63,6 +63,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+// ensureColumn executes an ALTER TABLE ADD COLUMN query if the column does not already exist.
+// Note: table, column, and definition must be hardcoded internal strings, not derived from user input.
 func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
 	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

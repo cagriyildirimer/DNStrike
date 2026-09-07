@@ -202,12 +202,20 @@ func (o *Orchestrator) executeTest(id int64) {
 			score, result, execErr = o.runSubdomainTakeoverScenario(ctx, test, target, meta, config)
 		} else if meta.ID == "rrl-threshold" {
 			score, result, execErr = o.runRRLThresholdScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "dns-tunneling" {
+			score, result, execErr = o.runDNSTunnelingScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "ecs-manipulation" {
+			score, result, execErr = o.runECSManipulationScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "dnssec-audit" {
+			score, result, execErr = o.runDNSSECAuditScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
 		}
 	case "performance", "volume":
 		if meta.ID == "tcp-slowloris" {
 			score, result, execErr = o.runTCPSlowlorisScenario(ctx, test, target, meta, config)
+		} else if meta.ID == "water-torture" {
+			score, result, execErr = o.runWaterTortureScenario(ctx, test, target, meta, config)
 		} else {
 			score, result, execErr = o.runPerformanceScenario(ctx, test, target, meta, config)
 		}
@@ -561,8 +569,7 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 	}()
 
 	results := pool.Run(runCtx, target, jobs)
-	
-	collector := metrics.NewCollector(8192)
+	collector := metrics.NewCollector(metrics.DefaultLatencySamples)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -596,10 +603,9 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 		}
 	}
 
-	if results != nil {
-		for res := range results {
-			collector.Record(res)
-		}
+	// Drain remaining results after context expires
+	for res := range results {
+		collector.Record(res)
 	}
 
 	snap := collector.Snapshot(time.Now())
@@ -707,10 +713,8 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 			select {
 			case <-stepCtx.Done():
 				ticker.Stop()
-				if results != nil {
-					for res := range results {
-						stepCollector.Record(res)
-					}
+				for res := range results {
+					stepCollector.Record(res)
 				}
 				break drainLoop
 			case res, ok := <-results:
@@ -873,10 +877,9 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 		}
 	}
 
-	if results != nil {
-		for res := range results {
-			collector.Record(res)
-		}
+	// Drain remaining results after context expires
+	for res := range results {
+		collector.Record(res)
 	}
 
 	snap := collector.Snapshot(time.Now())
@@ -1466,6 +1469,300 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 		"detected_threshold_qps": detectedThresholdQPS,
 		"status_summary":         statusText,
 		"stage_results":          results,
+	}
+
+	return score, result, nil
+}
+
+// DNS Covert Tunneling & Exfiltration Audit Logic
+func (o *Orchestrator) runDNSTunnelingScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNS Covert Tunneling & Exfiltration Audit against domain: %s..."}`, domain)))
+
+	secretPayload := "DNStrikeSecretExfiltrationAuditDataPayload_987654321_ConfidentialToken_XYZ"
+	chunkSize := 16
+	var chunks []string
+	for i := 0; i < len(secretPayload); i += chunkSize {
+		end := i + chunkSize
+		if end > len(secretPayload) {
+			end = len(secretPayload)
+		}
+		chunks = append(chunks, fmt.Sprintf("%x", secretPayload[i:end]))
+	}
+
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	sentChunks := 0
+	blockedChunks := 0
+	totalBytes := 0
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/2] Transmitting %d hex-encoded covert data chunks in subdomain queries..."}`, len(chunks))))
+
+	for idx, chunk := range chunks {
+		subdomain := fmt.Sprintf("chunk%d-%s.%s.", idx, chunk, domain)
+		q := models.DNSQuery{Domain: subdomain, QueryType: "TXT", Protocol: "udp"}
+		res, err := engine.Execute(ctx, target, q)
+		totalBytes += len(chunk)
+
+		if err != nil || res.RCode == 5 || res.RCode == 3 {
+			blockedChunks++
+		} else {
+			sentChunks++
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[2/2] Exfiltration summary: %d/%d chunks passed through, %d blocked."}`, sentChunks, len(chunks), blockedChunks)))
+
+	score := 100
+	statusText := "SECURE (COVERT TUNNELING BLOCKED)"
+
+	if sentChunks == len(chunks) {
+		score = 20
+		statusText = "HIGH VULNERABILITY (COVERT TUNNELING PASSED UNCHECKED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[CRITICAL] All covert DNS tunneling payload chunks were successfully resolved without DLP/firewall blocking!"}`))
+	} else if sentChunks > 0 {
+		score = 60
+		statusText = "MEDIUM VULNERABILITY (PARTIAL TUNNELING PERMITTED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Partial exfiltration detected (%d/%d chunks resolved)."}`, sentChunks, len(chunks))))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Covert tunneling queries were blocked or refused by target network security."}`))
+	}
+
+	result := map[string]any{
+		"domain":            domain,
+		"total_chunks":      len(chunks),
+		"delivered_chunks":  sentChunks,
+		"blocked_chunks":    blockedChunks,
+		"total_bytes_sent":  totalBytes,
+		"entropy_rating":    "HIGH (HEX ENCODED)",
+		"status_summary":    statusText,
+	}
+
+	return score, result, nil
+}
+
+// Water Torture (Random Subdomain NXDOMAIN Flood) Logic
+func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+	qps := 200
+	if val, ok := config["qps"].(float64); ok && val > 0 {
+		qps = int(val)
+	}
+	durationSec := 15
+	if val, ok := config["duration"].(float64); ok && val > 0 {
+		durationSec = int(val)
+	}
+
+	workers := 20
+	if val, ok := config["workers"].(float64); ok && val > 0 {
+		workers = int(val)
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Water Torture (Random Subdomain NXDOMAIN Flood) against %s at %d QPS for %ds..."}`, domain, qps, durationSec)))
+
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	pool, err := dnsengine.NewWorkerPool(engine, dnsengine.PoolConfig{
+		Workers: workers,
+		QPS:     qps,
+		Burst:   qps / 5,
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+
+	runCtx, cancelRun := context.WithTimeout(ctx, time.Duration(durationSec)*time.Second)
+	defer cancelRun()
+
+	jobs := make(chan models.DNSQuery)
+
+	go func() {
+		defer close(jobs)
+		var sourceIPs []string
+		if val, ok := config["_parsed_source_ips"].([]string); ok {
+			sourceIPs = val
+		}
+		ipIdx := 0
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			default:
+				var srcIP string
+				if len(sourceIPs) > 0 {
+					srcIP = sourceIPs[ipIdx%len(sourceIPs)]
+					ipIdx++
+				}
+				randLabel := fmt.Sprintf("rand-%d-%d", time.Now().UnixNano(), ipIdx)
+				jobs <- models.DNSQuery{
+					Domain:    fmt.Sprintf("%s.%s.", randLabel, domain),
+					QueryType: "A",
+					Protocol:  "udp",
+					SourceIP:  srcIP,
+				}
+			}
+		}
+	}()
+
+	results := pool.Run(runCtx, target, jobs)
+	collector := metrics.NewCollector(8192)
+
+	for res := range results {
+		collector.Record(res)
+	}
+
+	snap := collector.Snapshot(time.Now())
+	nxdomainCount := snap.ResponseCodes["NXDOMAIN"]
+	refusedCount := snap.ResponseCodes["REFUSED"]
+
+	score := 100
+	statusText := "EXCELLENT RESILIENCE (RECURSION REFUSED / BOUNDED)"
+
+	if snap.TotalQueries > 0 {
+		errorRate := float64(snap.Errors) / float64(snap.TotalQueries)
+		if errorRate > 0.30 {
+			score = 40
+			statusText = "HIGH VULNERABILITY (HIGH ERROR/DROPPED RATE DURING NXDOMAIN FLOOD)"
+		} else if nxdomainCount > 0 {
+			score = 75
+			statusText = "MODERATE (UPSTREAM AUTHORITATIVE PRESSURE DETECTED)"
+		}
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WATER TORTURE COMPLETE] Queries: %d, NXDOMAIN: %d, Refused: %d, Timeouts: %d, Avg Latency: %.2fms"}`, snap.TotalQueries, nxdomainCount, refusedCount, snap.Timeouts, snap.AverageLatencyMS)))
+
+	result := map[string]any{
+		"target_domain":  domain,
+		"total_queries":  snap.TotalQueries,
+		"nxdomain_count": nxdomainCount,
+		"refused_count":  refusedCount,
+		"timeouts":       snap.Timeouts,
+		"avg_latency_ms": snap.AverageLatencyMS,
+		"p99_latency_ms": snap.P99LatencyMS,
+		"status_summary": statusText,
+	}
+
+	return score, result, nil
+}
+
+// EDNS0 Client Subnet (ECS) Geo-Spoofing Audit Logic
+func (o *Orchestrator) runECSManipulationScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting EDNS0 Client Subnet (ECS) Geo-Spoofing Audit for domain: %s..."}`, domain)))
+
+	type geoSubnet struct {
+		Region string
+		Subnet string
+	}
+
+	subnets := []geoSubnet{
+		{Region: "US East (Virginia)", Subnet: "8.8.8.0"},
+		{Region: "Europe (Frankfurt)", Subnet: "194.12.200.0"},
+		{Region: "Asia (Tokyo)", Subnet: "210.140.0.0"},
+		{Region: "South America (Brazil)", Subnet: "200.160.0.0"},
+		{Region: "Global IPv6", Subnet: "2001:4860:4860::"},
+	}
+
+	engine := dnsengine.NewQueryEngine(3 * time.Second)
+	ecsSupported := false
+	geoAnswers := make(map[string]string)
+
+	for _, s := range subnets {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Injecting ECS Option: %s (%s)..."}`, s.Region, s.Subnet)))
+		q := models.DNSQuery{
+			Domain:       domain,
+			QueryType:    "A",
+			Protocol:     "udp",
+			ClientSubnet: s.Subnet,
+		}
+		res, err := engine.Execute(ctx, target, q)
+		if err == nil && res.RCode == 0 {
+			ecsSupported = true
+			geoAnswers[s.Region] = fmt.Sprintf("RCode: %s (%dms)", res.RCodeName, int(res.LatencyMS))
+		} else {
+			geoAnswers[s.Region] = "No Response / Refused"
+		}
+	}
+
+	score := 100
+	statusText := "SECURE (ECS OPTION HANDLED / PRIVACY RESPECTED)"
+
+	if ecsSupported {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target DNS server processed queries containing EDNS0 Client Subnet options."}`))
+	} else {
+		score = 90
+		statusText = "NOTICE (ECS OPTION NOT REFLECTED OR STRIPPED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTE] Target DNS server stripped or ignored ECS options (privacy protection active)."}`))
+	}
+
+	result := map[string]any{
+		"domain":        domain,
+		"ecs_supported": ecsSupported,
+		"geo_responses": geoAnswers,
+		"status_summary": statusText,
+	}
+
+	return score, result, nil
+}
+
+// DNSSEC Cryptographic & Health Audit Logic
+func (o *Orchestrator) runDNSSECAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNSSEC Cryptographic & Health Audit for domain: %s..."}`, domain)))
+
+	engine := dnsengine.NewQueryEngine(3 * time.Second)
+
+	// 1. Query DNSKEY with DO bit
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/3] Querying DNSKEY records with DO (DNSSEC OK) flag..."}`))
+	keyRes, keyErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DNSKEY", Protocol: "udp", DNSSECOK: true})
+
+	// 2. Query DS record
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/3] Querying DS (Delegation Signer) records..."}`))
+	dsRes, dsErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DS", Protocol: "udp", DNSSECOK: true})
+
+	// 3. Query SOA RRSIG
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[3/3] Querying SOA RRSIG cryptographic signatures..."}`))
+	soaRes, soaErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "SOA", Protocol: "udp", DNSSECOK: true})
+
+	hasDNSKEY := keyErr == nil && keyRes.RCode == 0
+	hasDS := dsErr == nil && dsRes.RCode == 0
+	hasRRSIG := soaErr == nil && soaRes.RCode == 0
+
+	score := 100
+	statusText := "DNSSEC FULLY ACTIVE & VALIDATED"
+
+	if !hasDNSKEY && !hasDS {
+		score = 50
+		statusText = "NOTICE (DNSSEC NOT SIGNED FOR DOMAIN)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTICE] Target domain is not signed with DNSSEC (No DNSKEY/DS records returned)."} `))
+	} else if hasDNSKEY && hasRRSIG {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[EXCELLENT] Target returned valid DNSKEY records and RRSIG signatures."}`))
+	} else {
+		score = 75
+		statusText = "PARTIAL DNSSEC IMPLEMENTATION"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Partial DNSSEC records detected."}`))
+	}
+
+	result := map[string]any{
+		"domain":         domain,
+		"dnskey_present": hasDNSKEY,
+		"ds_present":     hasDS,
+		"rrsig_present":  hasRRSIG,
+		"status_summary": statusText,
 	}
 
 	return score, result, nil

@@ -44,6 +44,31 @@ export function NewTestPage() {
 
   const selectedScenario = scenarios.data?.find(s => s.id === selectedScenarioId);
 
+  const [activeCategory, setActiveCategory] = useState<string>('all');
+
+  const categories = [
+    { id: 'all', label: 'All Scenarios', icon: '🌐' },
+    { id: 'audit', label: 'Security Audits', icon: '🛡️' },
+    { id: 'performance', label: 'Performance', icon: '⚡' },
+    { id: 'resolver-cache', label: 'Resolver Cache', icon: '🧠' },
+    { id: 'volume', label: 'Volume & Exhaustion', icon: '💣' },
+  ];
+
+  const filteredScenarios = scenarios.data?.filter(s => 
+    activeCategory === 'all' ? true : s.category === activeCategory
+  ) ?? [];
+
+  // Auto select first scenario when category changes if current scenario doesn't belong
+  const handleCategoryChange = (catId: string) => {
+    setActiveCategory(catId);
+    if (scenarios.data) {
+      const match = scenarios.data.find(s => catId === 'all' || s.category === catId);
+      if (match) {
+        setSelectedScenarioId(match.id);
+      }
+    }
+  };
+
   return (
     <>
       <PageHeader 
@@ -68,7 +93,7 @@ export function NewTestPage() {
           <div className="panel-header">
             <div>
               <h2>Configuration</h2>
-              <p>Select target and define execution bounds.</p>
+              <p>Select category, attack scenario, and define execution parameters.</p>
             </div>
             <Zap size={24} style={{ color: 'var(--accent-blue)' }} />
           </div>
@@ -83,11 +108,70 @@ export function NewTestPage() {
             </div>
             
             <div className="form-group" style={{ marginTop: '1.5rem' }}>
-              <label>Test Scenario</label>
-              <select className="form-control" value={selectedScenarioId} onChange={e => setSelectedScenarioId(e.target.value)}>
-                {scenarios.data?.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.category})</option>
+              <label>1. Attack Category</label>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+                {categories.map(cat => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => handleCategoryChange(cat.id)}
+                    className="btn"
+                    style={{
+                      padding: '0.4rem 0.8rem',
+                      fontSize: '0.8rem',
+                      background: activeCategory === cat.id ? 'var(--accent-blue)' : 'rgba(255,255,255,0.05)',
+                      color: activeCategory === cat.id ? '#fff' : 'var(--text-secondary)',
+                      border: `1px solid ${activeCategory === cat.id ? 'var(--accent-blue)' : 'var(--border-color)'}`,
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.4rem'
+                    }}
+                  >
+                    <span>{cat.icon}</span>
+                    <span>{cat.label}</span>
+                  </button>
                 ))}
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '1.25rem' }}>
+              <label>2. Attack Simulation Routine ({filteredScenarios.length} Available)</label>
+              <select 
+                className="form-control" 
+                value={selectedScenarioId} 
+                onChange={e => setSelectedScenarioId(e.target.value)}
+                style={{ fontSize: '0.9rem', fontWeight: 500 }}
+              >
+                {activeCategory === 'all' ? (
+                  <>
+                    <optgroup label="🛡️ Security Audits & Recon">
+                      {scenarios.data?.filter(s => s.category === 'audit').map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="⚡ Performance & Benchmarking">
+                      {scenarios.data?.filter(s => s.category === 'performance').map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="🧠 Resolver Cache Stress">
+                      {scenarios.data?.filter(s => s.category === 'resolver-cache').map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="💣 Volume & Exhaustion">
+                      {scenarios.data?.filter(s => s.category === 'volume').map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </optgroup>
+                  </>
+                ) : (
+                  filteredScenarios.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))
+                )}
               </select>
             </div>
             
@@ -127,18 +211,53 @@ export function NewTestPage() {
                         </div>
                       );
                     }
-                    if (key === 'source_ip_pool') {
+                    if (key === 'subdomains' || key === 'subdomains_list') {
                       return (
                         <div className="form-group" key={key} style={{ gridColumn: '1 / -1' }}>
-                          <label style={{ textTransform: 'capitalize' }}>Source IP Pool</label>
+                          <label style={{ textTransform: 'capitalize' }}>Subdomains (one per line)</label>
+                          <textarea 
+                            className="form-control" 
+                            rows={3}
+                            placeholder="api.example.com&#10;staging.example.com"
+                            value={Array.isArray(value) ? value.join('\n') : (typeof value === 'string' ? value : '')} 
+                            onChange={e => {
+                              const lines = e.target.value.split('\n').map(s => s.trim()).filter(Boolean);
+                              setConfig({...config, [key]: lines});
+                            }} 
+                          />
+                          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Enter subdomains to scan/audit, one per line.</p>
+                        </div>
+                      );
+                    }
+                    if (Array.isArray(value)) {
+                      return (
+                        <div className="form-group" key={key} style={{ gridColumn: '1 / -1' }}>
+                          <label style={{ textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')} (comma-separated)</label>
                           <input 
                             type="text" 
                             className="form-control" 
-                            placeholder="e.g. 192.168.1.100, 192.168.1.101"
-                            value={value as string} 
-                            onChange={e => setConfig({...config, [key]: e.target.value})} 
+                            value={value.join(', ')} 
+                            onChange={e => setConfig({...config, [key]: e.target.value.split(',').map(s => s.trim()).filter(Boolean)})} 
                           />
-                          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Optional. Comma-separated list of local IPs to bind. Requires NET_ADMIN capability.</p>
+                        </div>
+                      );
+                    }
+                    if (typeof value === 'object' && value !== null) {
+                      return (
+                        <div className="form-group" key={key} style={{ gridColumn: '1 / -1' }}>
+                          <label style={{ textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')} (JSON)</label>
+                          <input 
+                            type="text" 
+                            className="form-control" 
+                            value={JSON.stringify(value)} 
+                            onChange={e => {
+                              try {
+                                setConfig({...config, [key]: JSON.parse(e.target.value)});
+                              } catch {
+                                // ignore invalid JSON while typing
+                              }
+                            }} 
+                          />
                         </div>
                       );
                     }

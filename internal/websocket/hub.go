@@ -78,8 +78,10 @@ func (h *Hub) Serve(c *gin.Context) {
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(70 * time.Second)) })
 	_ = conn.WriteJSON(gin.H{"type": "connected", "test_id": c.Param("id"), "timestamp": time.Now().UTC()})
 
-	// Read loop to process client disconnects
+	// Read loop signals done when client disconnects
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -92,6 +94,8 @@ func (h *Hub) Serve(c *gin.Context) {
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			return
+		case <-done:
 			return
 		case <-ticker.C:
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {

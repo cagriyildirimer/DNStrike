@@ -129,6 +129,31 @@ export function generatePdfReport(test: TestRun) {
       alertTitle = 'SECURE ZONE TRANSFER POSTURE';
       alertText = 'The DNS server correctly refused unauthorized AXFR zone transfer requests. Domain record database remains protected.';
     }
+  } else if (test.scenario === 'dns-tunneling') {
+    const delivered = Number(test.result?.delivered_chunks ?? 0);
+    if (delivered > 0) {
+      alertBg = [254, 242, 242];
+      alertBorder = [239, 68, 68];
+      alertTitleColor = [185, 28, 28];
+      alertTextColor = [127, 29, 29];
+      alertTitle = 'HIGH VULNERABILITY (COVERT TUNNELING PASSED)';
+      alertText = `Transmitted ${delivered} hex-encoded covert payload chunks through DNS queries without DLP or firewall blocking. Enforce DNS query length limits and entropy inspection.`;
+    } else {
+      alertTitle = 'COVERT TUNNELING BLOCKED';
+      alertText = 'Target network security successfully blocked or refused high-entropy covert data tunneling queries.';
+    }
+  } else if (test.scenario === 'water-torture') {
+    const nxdomainCount = Number(test.result?.nxdomain_count ?? 0);
+    alertTitle = 'WATER TORTURE (NXDOMAIN FLOOD) COMPLETE';
+    alertText = `Executed random subdomain flood generating ${nxdomainCount} NXDOMAIN responses. Analyzed resolver negative cache resilience and authoritative server isolation.`;
+  } else if (test.scenario === 'ecs-manipulation') {
+    const ecsSupported = Boolean(test.result?.ecs_supported);
+    alertTitle = ecsSupported ? 'ECS OPTION SUPPORTED' : 'ECS OPTION STRIPPED / PRIVACY PROTECTED';
+    alertText = ecsSupported ? 'Target DNS server processed EDNS0 Client Subnet options across regional subnets.' : 'Target DNS server stripped or ignored ECS client subnets to enforce privacy.';
+  } else if (test.scenario === 'dnssec-audit') {
+    const dnskey = Boolean(test.result?.dnskey_present);
+    alertTitle = dnskey ? 'DNSSEC ACTIVE & SIGNED' : 'NOTICE (DNSSEC NOT SIGNED)';
+    alertText = dnskey ? 'Target domain returned valid DNSKEY records and RRSIG cryptographic signatures.' : 'Target domain is not signed with DNSSEC (No DNSKEY/DS records returned).';
   } else if (test.scenario === 'tcp-slowloris') {
     if (test.result?.legitimate_tcp_served === false) {
       alertBg = [254, 242, 242];
@@ -211,7 +236,7 @@ export function generatePdfReport(test: TestRun) {
 
   const configBody = Object.entries(test.config || {}).map(([k, v]) => [
     k.replace(/_/g, ' '),
-    String(v)
+    typeof v === 'object' && v !== null ? (Array.isArray(v) ? v.join(', ') : JSON.stringify(v)) : String(v)
   ]);
 
   autoTable(doc, {
@@ -265,7 +290,11 @@ export function generatePdfReport(test: TestRun) {
     } else {
       const resultBody = Object.entries(test.result).map(([k, v]) => [
         k.replace(/_/g, ' '),
-        typeof v === 'number' && k.includes('latency') ? `${v.toFixed(2)} ms` : String(v)
+        typeof v === 'number' && k.includes('latency')
+          ? `${v.toFixed(2)} ms`
+          : typeof v === 'object' && v !== null
+          ? (Array.isArray(v) ? v.join(', ') : JSON.stringify(v))
+          : String(v)
       ]);
 
       autoTable(doc, {

@@ -35,12 +35,37 @@ func (e *QueryEngine) Execute(ctx context.Context, target models.Target, query m
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(query.Domain), queryTypes[query.QueryType])
 	message.RecursionDesired = true
-	if query.EDNSPayload > 0 || query.DNSSECOK {
+	if query.EDNSPayload > 0 || query.DNSSECOK || query.ClientSubnet != "" {
 		payload := query.EDNSPayload
 		if payload == 0 {
 			payload = 1232
 		}
-		message.SetEdns0(payload, query.DNSSECOK)
+		opt := message.IsEdns0()
+		if opt == nil {
+			message.SetEdns0(payload, query.DNSSECOK)
+			opt = message.IsEdns0()
+		} else {
+			opt.SetUDPSize(payload)
+			opt.SetDo(query.DNSSECOK)
+		}
+		if query.ClientSubnet != "" {
+			ip := net.ParseIP(query.ClientSubnet)
+			if ip != nil {
+				e := &dns.EDNS0_SUBNET{
+					Code:        dns.EDNS0SUBNET,
+					Address:     ip,
+					SourceScope: 0,
+				}
+				if ip.To4() != nil {
+					e.Family = 1
+					e.SourceNetmask = 24
+				} else {
+					e.Family = 2
+					e.SourceNetmask = 56
+				}
+				opt.Option = append(opt.Option, e)
+			}
+		}
 	}
 	client := &dns.Client{Net: query.Protocol, Timeout: e.Timeout}
 	if query.SourceIP != "" {
