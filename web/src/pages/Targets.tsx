@@ -1,4 +1,4 @@
-import { Plus, Server, Radar, Trash2, ChevronRight } from 'lucide-react';
+import { Plus, Server, Trash2, ChevronRight, RadioTower, Cable } from 'lucide-react';
 import { PageHeader } from '../components/Layout/PageHeader';
 import { StatCard } from '../components/Layout/StatCard';
 import { Target } from '../types';
@@ -28,9 +28,9 @@ export function TargetsPage({ items, loading, failed, openForm, discover, discov
       />
       
       <section className="card-grid">
-        <StatCard label="Total targets" value={String(items.length)} detail="Authorized endpoints" />
-        <StatCard label="UDP enabled" value={String(items.filter(x => x.udp_enabled).length)} detail="Datagram checks ready" />
-        <StatCard label="TCP enabled" value={String(items.filter(x => x.tcp_enabled).length)} detail="Fallback checks ready" />
+        <StatCard label="Total targets" value={String(items.length)} detail="Authorized endpoints" icon={<Server size={18} />} tone="cyan" />
+        <StatCard label="UDP enabled" value={String(items.filter(x => x.udp_enabled).length)} detail="Datagram checks ready" icon={<RadioTower size={18} />} tone="violet" />
+        <StatCard label="TCP enabled" value={String(items.filter(x => x.tcp_enabled).length)} detail="Fallback checks ready" icon={<Cable size={18} />} tone="emerald" />
       </section>
       
       <section className="panel">

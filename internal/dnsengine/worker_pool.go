@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/dnstrike/dnstrike/internal/limiter"
 	"github.com/dnstrike/dnstrike/pkg/models"
@@ -58,6 +59,12 @@ func (p *WorkerPool) Run(ctx context.Context, target models.Target, jobs <-chan 
 						return
 					}
 					result, _ := p.executor.Execute(ctx, target, query)
+					// The scenario deadline is a load-generator boundary, not a target
+					// failure. Do not count an in-flight query cancelled by that boundary.
+					deadline, hasDeadline := ctx.Deadline()
+					if ctx.Err() != nil || (hasDeadline && !time.Now().Before(deadline)) {
+						return
+					}
 					select {
 					case results <- result:
 					case <-ctx.Done():

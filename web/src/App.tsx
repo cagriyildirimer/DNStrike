@@ -103,7 +103,7 @@ export default function App() {
               <TestListPage 
                 title="Running Tests" 
                 description="Tests currently executing through the orchestrator." 
-                items={testItems.filter(item => item.status === 'RUNNING')} 
+                items={testItems.filter(item => item.status === 'RUNNING' || item.status === 'PENDING')}
                 targets={targetItems}
                 loading={tests.isLoading} 
               />

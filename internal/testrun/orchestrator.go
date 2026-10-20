@@ -3,6 +3,7 @@ package testrun
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,7 +33,9 @@ func performAXFR(target models.Target, domain string, timeout time.Duration) ([]
 	}
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
 	transfer := new(dns.Transfer)
+	transfer.DialTimeout = timeout
 	transfer.ReadTimeout = timeout
+	transfer.WriteTimeout = timeout
 
 	m := new(dns.Msg)
 	m.SetAxfr(dns.Fqdn(domain))
@@ -135,7 +138,7 @@ func (o *Orchestrator) executeTest(id int64) {
 		slog.Error("orchestrator failed to transition to running", "test_id", id, "error", err)
 		return
 	}
-	
+
 	o.hub.Broadcast(fmt.Sprintf("%d", id), []byte(`{"type":"status_change","status":"RUNNING"}`))
 
 	target, err := o.targets.GetTarget(ctx, test.TargetID)
@@ -189,7 +192,7 @@ func (o *Orchestrator) executeTest(id int64) {
 	}
 
 	slog.Info("orchestrator starting scenario", "test_id", id, "scenario", test.Scenario)
-	
+
 	switch meta.Category {
 	case "audit":
 		if meta.ID == "amplification-audit" {
@@ -233,9 +236,14 @@ func (o *Orchestrator) executeTest(id int64) {
 
 	if result != nil {
 		resultJSON, _ := json.Marshal(result)
-		o.tests.SaveResult(ctx, id, score, resultJSON)
+		err = o.tests.SaveResult(ctx, id, score, resultJSON)
 	} else {
-		o.tests.SaveResult(ctx, id, score, []byte("{}"))
+		err = o.tests.SaveResult(ctx, id, score, []byte("{}"))
+	}
+	if err != nil {
+		slog.Error("orchestrator failed to save result", "test_id", id, "error", err)
+		o.failTest(id, "test result could not be saved")
+		return
 	}
 
 	// Mark as completed
@@ -243,7 +251,7 @@ func (o *Orchestrator) executeTest(id int64) {
 	if err != nil {
 		slog.Error("orchestrator failed to mark completed", "test_id", id, "error", err)
 	}
-	
+
 	resultMsg := fmt.Sprintf(`{"type":"completed","score":%d}`, score)
 	o.hub.Broadcast(fmt.Sprintf("%d", id), []byte(resultMsg))
 }
@@ -260,27 +268,44 @@ func (o *Orchestrator) failTest(id int64, reason string) {
 // Security Audit Logic
 func (o *Orchestrator) runAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"Starting Security Audit..."}`))
-	
+
 	score := 100
 	engine := dnsengine.NewQueryEngine(3 * time.Second)
-	
+	checks := make(map[string]map[string]any, 3)
+	verifiedChecks := 0
+
 	// 1. Open Recursion Check
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/3] Checking for Open Recursion vulnerability..."}`))
-	res, err := engine.Execute(ctx, target, models.DNSQuery{Domain: "google.com.", QueryType: "A", Protocol: "udp"})
-	if err == nil && res.RCode == 0 {
+	protocol := scenarioProtocol(target)
+	res, err := engine.Execute(ctx, target, models.DNSQuery{Domain: "google.com.", QueryType: "A", Protocol: protocol})
+	if err != nil {
+		checks["open_recursion"] = map[string]any{"status": "unverified", "error": err.Error()}
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Open recursion check could not be verified because the DNS query failed."}`))
+	} else if res.RCode == dns.RcodeSuccess && res.RecursionAvailable && res.AnswerCount > 0 {
+		verifiedChecks++
+		checks["open_recursion"] = map[string]any{"status": "vulnerable", "rcode": res.RCodeName, "recursion_available": true}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Target is an Open Resolver (Recursion enabled for external domains). Vulnerable to DNS Amplification attacks."}`))
 		score -= 40
 	} else {
+		verifiedChecks++
+		checks["open_recursion"] = map[string]any{"status": "secure", "rcode": res.RCodeName, "recursion_available": res.RecursionAvailable}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target refused recursion for external domains."}`))
 	}
 
 	// 2. Information Leakage (version.bind)
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/3] Checking version.bind CHAOS TXT leakage..."}`))
-	res, err = engine.Execute(ctx, target, models.DNSQuery{Domain: "version.bind.", QueryType: "TXT", Protocol: "udp"})
-	if err == nil && res.RCode == 0 {
+	res, err = engine.Execute(ctx, target, models.DNSQuery{Domain: "version.bind.", QueryType: "TXT", QueryClass: "CH", Protocol: protocol})
+	if err != nil {
+		checks["version_disclosure"] = map[string]any{"status": "unverified", "error": err.Error()}
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] version.bind disclosure check could not be verified because the DNS query failed."}`))
+	} else if res.RCode == dns.RcodeSuccess && res.AnswerCount > 0 {
+		verifiedChecks++
+		checks["version_disclosure"] = map[string]any{"status": "vulnerable", "rcode": res.RCodeName, "answer_count": res.AnswerCount}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Target leaked software version via CHAOS class query."}`))
 		score -= 20
 	} else {
+		verifiedChecks++
+		checks["version_disclosure"] = map[string]any{"status": "secure", "rcode": res.RCodeName, "answer_count": res.AnswerCount}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target did not leak version.bind."}`))
 	}
 
@@ -289,23 +314,54 @@ func (o *Orchestrator) runAuditScenario(ctx context.Context, test models.Test, t
 	if val, ok := config["domain"].(string); ok && val != "" {
 		domain = val
 	}
-	
+
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[3/3] Attempting AXFR zone transfer for domain: %s"}`, domain)))
-	
-	_, _, leaked, failed, errStr := performAXFR(target, domain, 5*time.Second)
+
+	_, recordCounts, leaked, failed, errStr := performAXFR(target, domain, 5*time.Second)
 	if !failed && leaked > 0 {
+		verifiedChecks++
+		checks["zone_transfer"] = map[string]any{"status": "vulnerable", "leaked_records": leaked, "record_counts": recordCounts}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] AXFR Successful! Leaked %d zone records."}`, leaked)))
 		score -= 40
+	} else if failed && isAXFRRefusal(errStr) {
+		verifiedChecks++
+		checks["zone_transfer"] = map[string]any{"status": "secure", "error": errStr}
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR request was explicitly refused by the target."}`))
 	} else if failed {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] AXFR connection refused or timed out (%s)."}`, errStr)))
+		checks["zone_transfer"] = map[string]any{"status": "unverified", "error": errStr}
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] AXFR check could not be verified because TCP was unavailable or the request timed out."}`))
 	} else {
+		verifiedChecks++
+		checks["zone_transfer"] = map[string]any{"status": "secure", "leaked_records": 0}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR attempted but no records were returned."}`))
 	}
 
 	if score < 0 {
 		score = 0
 	}
-	return score, nil, nil
+	if verifiedChecks == 0 {
+		return 0, nil, errors.New("security audit could not verify any check: DNS target is unreachable")
+	}
+	complete := verifiedChecks == 3
+	statusSummary := "AUDIT COMPLETE"
+	if !complete {
+		statusSummary = "PARTIAL AUDIT (ONE OR MORE CHECKS UNVERIFIED)"
+	}
+	result := map[string]any{
+		"domain":          domain,
+		"checks":          checks,
+		"verified_checks": verifiedChecks,
+		"total_checks":    3,
+		"audit_complete":  complete,
+		"status_summary":  statusSummary,
+	}
+	return score, result, nil
+}
+
+func isAXFRRefusal(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "bad xfr rcode: 5") ||
+		strings.Contains(message, "not authoritative")
 }
 
 // Amplification & RRL Audit Logic
@@ -345,6 +401,7 @@ func (o *Orchestrator) runAmplificationAuditScenario(ctx context.Context, test m
 	var results []ampItem
 	maxAmp := 0.0
 	maxRespBytes := 0
+	successfulMeasurements := 0
 	score := 100
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/2] Measuring query/response payload sizes and amplification factors..."}`))
@@ -377,6 +434,7 @@ func (o *Orchestrator) runAmplificationAuditScenario(ctx context.Context, test m
 		status := "SAFE"
 
 		if err == nil && resp != nil {
+			successfulMeasurements++
 			respLen = resp.Len()
 			rcodeStr = dns.RcodeToString[resp.Rcode]
 			if reqLen > 0 {
@@ -416,6 +474,9 @@ func (o *Orchestrator) runAmplificationAuditScenario(ctx context.Context, test m
 		}
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"- [%s (%s)] Req: %dB, Resp: %dB, Amplification: %.2fx, RCode: %s"}`, tc.qType, ednsLabel, reqLen, respLen, amp, rcodeStr)))
 	}
+	if successfulMeasurements == 0 {
+		return 0, nil, errors.New("amplification audit could not obtain any DNS response from target")
+	}
 
 	// 2. Response Rate Limiting (RRL) Burst Test
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/2] Running 50-query burst test for Response Rate Limiting (RRL)..."}`))
@@ -424,15 +485,34 @@ func (o *Orchestrator) runAmplificationAuditScenario(ctx context.Context, test m
 	burstMsg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	burstMsg.RecursionDesired = true
 
-	fastClient := &dns.Client{Net: "udp", Timeout: 800 * time.Millisecond}
+	type burstResult struct {
+		dropped   bool
+		truncated bool
+	}
+	burstResults := make(chan burstResult, 50)
+	var burstWG sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		burstWG.Add(1)
+		go func() {
+			defer burstWG.Done()
+			fastClient := &dns.Client{Net: "udp", Timeout: 800 * time.Millisecond}
+			resp, _, err := fastClient.ExchangeContext(ctx, burstMsg.Copy(), address)
+			burstResults <- burstResult{
+				dropped:   err != nil || resp == nil,
+				truncated: err == nil && resp != nil && resp.Truncated,
+			}
+		}()
+	}
+	burstWG.Wait()
+	close(burstResults)
+
 	dropped := 0
 	truncated := 0
-
-	for i := 0; i < 50; i++ {
-		resp, _, err := fastClient.ExchangeContext(ctx, burstMsg, address)
-		if err != nil {
+	for burst := range burstResults {
+		if burst.dropped {
 			dropped++
-		} else if resp != nil && resp.Truncated {
+		}
+		if burst.truncated {
 			truncated++
 		}
 	}
@@ -487,26 +567,30 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 	if val, ok := config["qps"].(float64); ok {
 		qps = int(val)
 	}
-	
+
 	workers := 10
 	if val, ok := config["workers"].(float64); ok {
 		workers = int(val)
 	}
-	
+
 	duration := 10
 	if val, ok := config["duration"].(float64); ok {
 		duration = int(val)
 	}
+	protocol := scenarioProtocol(target)
+	if err := verifyDNSBaseline(ctx, target, protocol); err != nil {
+		return 0, nil, fmt.Errorf("performance scenario baseline failed: %w", err)
+	}
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting benchmark with %d QPS using %d workers for %d seconds..."}`, qps, workers, duration)))
-	
+
 	engine := dnsengine.NewQueryEngine(1 * time.Second)
 	pool, err := dnsengine.NewWorkerPool(engine, dnsengine.PoolConfig{
 		Workers: workers,
 		QPS:     qps,
-		Burst:   qps / 10,
+		Burst:   burstSize(qps, 10),
 	})
-	
+
 	if err != nil {
 		return 0, nil, err
 	}
@@ -519,7 +603,6 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 	if val, ok := config["_parsed_source_ips"].([]string); ok {
 		sourceIPs = val
 	}
-
 	// Start feeding jobs
 	go func() {
 		defer close(jobs)
@@ -529,41 +612,41 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 			case <-runCtx.Done():
 				return
 			default:
-					var srcIP string
-					if len(sourceIPs) > 0 {
-						srcIP = sourceIPs[ipIdx%len(sourceIPs)]
-						ipIdx++
+				var srcIP string
+				if len(sourceIPs) > 0 {
+					srcIP = sourceIPs[ipIdx%len(sourceIPs)]
+					ipIdx++
+				}
+
+				if meta.ID == "query-flood" {
+					qt := "A"
+					if val, ok := config["query_type"].(string); ok {
+						qt = val
 					}
 
-					if meta.ID == "query-flood" {
-						qt := "A"
-						if val, ok := config["query_type"].(string); ok {
-							qt = val
-						}
-						
-						domain := "example.com"
-						
-						if val, ok := config["domain_list"].([]any); ok && len(val) > 0 {
-							idx := time.Now().UnixNano() % int64(len(val))
-							if strVal, isStr := val[idx].(string); isStr {
-								domain = strVal
-							}
-						}
-						
-						jobs <- models.DNSQuery{
-							Domain: domain + ".",
-							QueryType: qt,
-							Protocol: "udp",
-							SourceIP: srcIP,
-						}
-					} else {
-						jobs <- models.DNSQuery{
-							Domain: "example.com.",
-							QueryType: "A",
-							Protocol: "udp",
-							SourceIP: srcIP,
+					domain := "example.com"
+
+					if val, ok := config["domain_list"].([]any); ok && len(val) > 0 {
+						idx := time.Now().UnixNano() % int64(len(val))
+						if strVal, isStr := val[idx].(string); isStr {
+							domain = strVal
 						}
 					}
+
+					jobs <- models.DNSQuery{
+						Domain:    domain + ".",
+						QueryType: qt,
+						Protocol:  protocol,
+						SourceIP:  srcIP,
+					}
+				} else {
+					jobs <- models.DNSQuery{
+						Domain:    "example.com.",
+						QueryType: "A",
+						Protocol:  protocol,
+						SourceIP:  srcIP,
+					}
+				}
 			}
 		}
 	}()
@@ -609,6 +692,9 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 	}
 
 	snap := collector.Snapshot(time.Now())
+	if snap.TotalQueries == 0 {
+		return 0, nil, errors.New("performance scenario produced no DNS queries")
+	}
 	score := 100
 	if snap.TotalQueries > 0 {
 		errorRate := float64(snap.Errors) / float64(snap.TotalQueries)
@@ -654,20 +740,25 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 	}
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[QPS RAMP] Starting ramp test. Start: %d, Step: %d, Max: %d, Step Duration: %ds"}`, startQps, stepQps, maxQps, stepDuration)))
-	
+
 	currentQps := startQps
 	engine := dnsengine.NewQueryEngine(1 * time.Second)
-	
+	protocol := scenarioProtocol(target)
+	if err := verifyDNSBaseline(ctx, target, protocol); err != nil {
+		return 0, nil, fmt.Errorf("QPS ramp baseline failed: %w", err)
+	}
+
 	finalScore := 100
+	maxStableQPS := 0
 	for currentQps <= maxQps {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Testing at %d QPS..."}`, currentQps)))
-		
+
 		pool, err := dnsengine.NewWorkerPool(engine, dnsengine.PoolConfig{
 			Workers: 50, // Fixed high number for ramp
 			QPS:     currentQps,
-			Burst:   currentQps / 10,
+			Burst:   burstSize(currentQps, 10),
 		})
-		
+
 		if err != nil {
 			return 0, nil, err
 		}
@@ -694,20 +785,20 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 						ipIdx++
 					}
 					jobs <- models.DNSQuery{
-						Domain: "example.com.",
+						Domain:    "example.com.",
 						QueryType: "A",
-						Protocol: "udp",
-						SourceIP: srcIP,
+						Protocol:  protocol,
+						SourceIP:  srcIP,
 					}
 				}
 			}
 		}()
 
 		results := pool.Run(stepCtx, target, jobs)
-		
+
 		stepCollector := metrics.NewCollector(4096)
 		ticker := time.NewTicker(1 * time.Second)
-		
+
 	drainLoop:
 		for {
 			select {
@@ -744,36 +835,40 @@ func (o *Orchestrator) runQPSRampScenario(ctx context.Context, test models.Test,
 		stepSnap := stepCollector.Snapshot(time.Now())
 		stepTotal := int(stepSnap.TotalQueries)
 		stepErrors := int(stepSnap.Errors)
-		
+		if stepTotal == 0 {
+			return 0, nil, errors.New("QPS ramp stage produced no DNS queries")
+		}
+
 		// Evaluate step
 		errorRate := 0.0
 		if stepTotal > 0 {
 			errorRate = float64(stepErrors) / float64(stepTotal)
 		}
-		
+
 		if errorRate > 0.1 { // More than 10% errors
 			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Server failed at %d QPS. Error rate: %.2f%%"}`, currentQps, errorRate*100)))
-			finalScore = int((float64(currentQps) / float64(maxQps)) * 100)
+			finalScore = int((float64(maxStableQPS) / float64(maxQps)) * 100)
 			break
 		}
-		
+
+		maxStableQPS = currentQps
 		currentQps += stepQps
 	}
-	
+
 	if currentQps > maxQps {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] Target successfully handled max load of %d QPS"}`, maxQps)))
 	}
 
 	result := map[string]any{
-		"max_qps_reached": currentQps - stepQps,
+		"max_qps_reached": maxStableQPS,
 	}
 
 	return finalScore, result, nil
 }
 
-
 // Cache Resilience Logic (NXDOMAIN)
 func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	protocol := scenarioProtocol(target)
 	qps := 100
 	if val, ok := config["qps"].(float64); ok {
 		qps = int(val)
@@ -790,6 +885,9 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 	if val, ok := config["base_domain"].(string); ok {
 		baseDomain = val
 	}
+	if err := verifyDNSBaseline(ctx, target, protocol); err != nil {
+		return 0, nil, fmt.Errorf("cache scenario baseline failed: %w", err)
+	}
 
 	scenarioName := "[WATER TORTURE]"
 	if meta.ID == "random-subdomain" {
@@ -797,14 +895,14 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 	}
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"%s Stressing cache with queries against *.%s for %d seconds..."}`, scenarioName, baseDomain, duration)))
-	
+
 	engine := dnsengine.NewQueryEngine(1 * time.Second)
 	pool, err := dnsengine.NewWorkerPool(engine, dnsengine.PoolConfig{
 		Workers: workers,
 		QPS:     qps,
-		Burst:   qps / 10,
+		Burst:   burstSize(qps, 10),
 	})
-	
+
 	if err != nil {
 		return 0, nil, err
 	}
@@ -832,17 +930,17 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 					ipIdx++
 				}
 				jobs <- models.DNSQuery{
-					Domain: fmt.Sprintf("%d.%s.", time.Now().UnixNano(), baseDomain),
+					Domain:    fmt.Sprintf("%d.%s.", time.Now().UnixNano(), baseDomain),
 					QueryType: "A",
-					Protocol: "udp",
-					SourceIP: srcIP,
+					Protocol:  protocol,
+					SourceIP:  srcIP,
 				}
 			}
 		}
 	}()
 
 	results := pool.Run(runCtx, target, jobs)
-	
+
 	collector := metrics.NewCollector(8192)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -883,6 +981,9 @@ func (o *Orchestrator) runCacheScenario(ctx context.Context, test models.Test, t
 	}
 
 	snap := collector.Snapshot(time.Now())
+	if snap.TotalQueries == 0 {
+		return 0, nil, errors.New("cache scenario produced no DNS queries")
+	}
 	score := 100
 	if snap.TotalQueries > 0 {
 		errorRate := float64(snap.Errors) / float64(snap.TotalQueries)
@@ -926,6 +1027,9 @@ func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.
 
 	if !target.TCPEnabled {
 		return 0, nil, fmt.Errorf("target TCP port 53 is disabled in target configuration")
+	}
+	if err := verifyDNSBaseline(ctx, target, "tcp"); err != nil {
+		return 0, nil, fmt.Errorf("TCP slowloris baseline failed: %w", err)
 	}
 
 	sockets := make([]net.Conn, 0, connections)
@@ -990,7 +1094,7 @@ func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.
 	engine := dnsengine.NewQueryEngine(3 * time.Second)
 	probeRes, probeErr := engine.Execute(ctx, target, models.DNSQuery{Domain: "example.com.", QueryType: "A", Protocol: "tcp"})
 
-	legitimateServed := probeErr == nil && probeRes.RCode == 0
+	legitimateServed := probeErr == nil
 
 	// Close all open attack sockets
 	mu.Lock()
@@ -1025,13 +1129,13 @@ func (o *Orchestrator) runTCPSlowlorisScenario(ctx context.Context, test models.
 	}
 
 	result := map[string]any{
-		"connections_requested":  connections,
+		"connections_requested":   connections,
 		"connections_established": established,
-		"connections_dropped":    dropped,
-		"hold_duration_seconds":  holdDuration,
-		"legitimate_tcp_served":  legitimateServed,
-		"probe_latency_ms":       probeLatency,
-		"status_summary":         statusText,
+		"connections_dropped":     dropped,
+		"hold_duration_seconds":   holdDuration,
+		"legitimate_tcp_served":   legitimateServed,
+		"probe_latency_ms":        probeLatency,
+		"status_summary":          statusText,
 	}
 
 	return score, result, nil
@@ -1062,8 +1166,11 @@ func (o *Orchestrator) runZoneTransferAuditScenario(ctx context.Context, test mo
 		score = 0
 		statusText = "CRITICAL VULNERABILITY (ZONE LEAK DETECTED)"
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] AXFR Transfer SUCCESSFUL! Leaked %d total zone records for domain %s!"}`, totalLeaked, domain)))
+	} else if transferFailed && isAXFRRefusal(errMessage) {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR request was explicitly refused by the target. No records leaked."}`))
 	} else if transferFailed {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] AXFR Transfer refused/failed by target (%s). No records leaked."}`, errMessage)))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[ERROR] AXFR audit could not reach the target over TCP or timed out."}`))
+		return 0, nil, fmt.Errorf("AXFR audit could not be completed: %s", errMessage)
 	} else {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] AXFR query returned 0 records. Domain data is protected."}`))
 	}
@@ -1089,6 +1196,10 @@ func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Te
 	}
 
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	if _, err := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "A", Protocol: "udp"}); err != nil {
+		return 0, nil, fmt.Errorf("DNS fuzzing audit could not establish a healthy baseline: %w", err)
+	}
 
 	type fuzzVector struct {
 		Category string `json:"category"`
@@ -1141,7 +1252,6 @@ func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Te
 	}
 
 	var vectorResults []vectorResult
-	engine := dnsengine.NewQueryEngine(2 * time.Second)
 	udpClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 
 	targetCrashed := false
@@ -1176,7 +1286,7 @@ func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Te
 		probeRes, probeErr := engine.Execute(ctx, target, models.DNSQuery{Domain: "example.com.", QueryType: "A", Protocol: "udp"})
 
 		healthText := "PASSED (SERVER ALIVE)"
-		if probeErr != nil || probeRes.RCode != 0 {
+		if probeErr != nil {
 			healthText = "FAILED (PROCESS UNRESPONSIVE)"
 			targetCrashed = true
 			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Post-fuzz health check FAILED after vector: %s! Server is unresponsive."}`, vec.Name)))
@@ -1199,11 +1309,11 @@ func (o *Orchestrator) runDNSFuzzingScenario(ctx context.Context, test models.Te
 	}
 
 	result := map[string]any{
-		"domain":            domain,
-		"vectors_tested":    len(vectors),
-		"target_crashed":    targetCrashed,
-		"status_summary":    statusText,
-		"fuzzing_results":   vectorResults,
+		"domain":          domain,
+		"vectors_tested":  len(vectors),
+		"target_crashed":  targetCrashed,
+		"status_summary":  statusText,
+		"fuzzing_results": vectorResults,
 	}
 
 	return score, result, nil
@@ -1217,28 +1327,23 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 	}
 
 	subdomains := []string{"api", "dev", "stage", "blog", "shop", "app", "docs", "status", "mail", "cdn"}
-	if rawSubs, ok := config["subdomains"].([]any); ok && len(rawSubs) > 0 {
-		subdomains = make([]string, 0, len(rawSubs))
-		for _, s := range rawSubs {
-			if str, isStr := s.(string); isStr && str != "" {
-				subdomains = append(subdomains, str)
-			}
-		}
+	if configured, ok := stringSlice(config["subdomains"]); ok && len(configured) > 0 {
+		subdomains = configured
 	}
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Subdomain Takeover & Dangling CNAME Scanner for %s (%d subdomains)..."}`, domain, len(subdomains))))
 
 	cloudSignatures := map[string]string{
-		"github.io":          "GitHub Pages",
-		"s3.amazonaws.com":   "AWS S3 Bucket",
-		"herokuapp.com":      "Heroku App",
-		"azurewebsites.net":  "Azure Web App",
-		"cloudapp.net":       "Azure Cloud App",
-		"vercel.app":         "Vercel Deployment",
-		"vercel-dns.com":     "Vercel DNS",
-		"netlify.app":        "Netlify Site",
-		"myshopify.com":      "Shopify Store",
-		"wordpress.com":      "WordPress Site",
+		"github.io":         "GitHub Pages",
+		"s3.amazonaws.com":  "AWS S3 Bucket",
+		"herokuapp.com":     "Heroku App",
+		"azurewebsites.net": "Azure Web App",
+		"cloudapp.net":      "Azure Cloud App",
+		"vercel.app":        "Vercel Deployment",
+		"vercel-dns.com":    "Vercel DNS",
+		"netlify.app":       "Netlify Site",
+		"myshopify.com":     "Shopify Store",
+		"wordpress.com":     "WordPress Site",
 	}
 
 	type cnameItem struct {
@@ -1252,6 +1357,8 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 	engine := dnsengine.NewQueryEngine(2 * time.Second)
 	vulnerableCount := 0
 	cnameFoundCount := 0
+	verifiedQueries := 0
+	failedQueries := 0
 
 	udpClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
@@ -1264,8 +1371,13 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(fqdn), dns.TypeCNAME)
 		resp, _, err := udpClient.ExchangeContext(ctx, m, address)
+		if err != nil || resp == nil {
+			failedQueries++
+			continue
+		}
+		verifiedQueries++
 
-		if err == nil && resp != nil && resp.Rcode == dns.RcodeSuccess {
+		if resp.Rcode == dns.RcodeSuccess {
 			cnameTarget := ""
 			for _, rr := range resp.Answer {
 				if cnameRR, ok := rr.(*dns.CNAME); ok {
@@ -1287,13 +1399,16 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 				// Check if the CNAME target resolves or returns NXDOMAIN/Timeout (Dangling pointer)
 				targetRes, targetErr := engine.Execute(ctx, target, models.DNSQuery{Domain: cnameTarget, QueryType: "A", Protocol: "udp"})
 
-				isDangling := targetErr != nil || targetRes.RCode == 3 // NXDOMAIN
+				isDangling := targetErr == nil && targetRes.RCode == dns.RcodeNameError
 
 				itemStatus := "SAFE (RESOLVING)"
 				if isDangling {
 					vulnerableCount++
 					itemStatus = "VULNERABLE (DANGLING CNAME)"
 					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Dangling CNAME detected on %s -> %s (%s)! Target returns NXDOMAIN."}`, fqdn, cnameTarget, detectedProvider)))
+				} else if targetErr != nil {
+					itemStatus = "UNVERIFIED (LOOKUP FAILED)"
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] CNAME target %s could not be verified because its lookup failed."}`, cnameTarget)))
 				} else {
 					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] CNAME found for %s -> %s (%s). Target resolves normally."}`, fqdn, cnameTarget, detectedProvider)))
 				}
@@ -1307,6 +1422,9 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 			}
 		}
 	}
+	if verifiedQueries == 0 {
+		return 0, nil, errors.New("subdomain takeover scan could not obtain any DNS response from target")
+	}
 
 	score := 100
 	statusText := "SECURE (NO DANGLING CNAMEs)"
@@ -1317,6 +1435,9 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 			score = 0
 		}
 		statusText = fmt.Sprintf("HIGH RISK (%d DANGLING CNAMEs FOUND)", vulnerableCount)
+	} else if failedQueries > 0 {
+		statusText = fmt.Sprintf("PARTIAL SCAN (%d OF %d QUERIES UNVERIFIED)", failedQueries, len(subdomains))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Scan completed partially; one or more subdomain lookups could not be verified."}`))
 	} else if cnameFoundCount == 0 {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Scan completed. No CNAME records were found for tested subdomains."}`))
 	}
@@ -1326,6 +1447,9 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 		"subdomains_scanned": len(subdomains),
 		"cnames_found":       cnameFoundCount,
 		"vulnerable_count":   vulnerableCount,
+		"verified_queries":   verifiedQueries,
+		"unverified_queries": failedQueries,
+		"scan_complete":      failedQueries == 0,
 		"status_summary":     statusText,
 		"scan_results":       results,
 	}
@@ -1343,6 +1467,12 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Response Rate Limiting (RRL) & SLIP Threshold Test for domain %s..."}`, domain)))
 
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	baselineClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	baselineMsg := new(dns.Msg)
+	baselineMsg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	if response, _, err := baselineClient.ExchangeContext(ctx, baselineMsg, address); err != nil || response == nil {
+		return 0, nil, errors.New("RRL threshold audit could not obtain a baseline DNS response from target")
+	}
 
 	type stageConfig struct {
 		Name string
@@ -1355,6 +1485,20 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 		{Name: "Stage 3 (High - 250 QPS)", QPS: 250},
 		{Name: "Stage 4 (Peak Burst - 500 QPS)", QPS: 500},
 	}
+	maxBurstQPS := 500
+	if value, ok := config["max_burst_qps"].(float64); ok {
+		maxBurstQPS = int(value)
+	}
+	boundedStages := make([]stageConfig, 0, len(stages))
+	for _, stage := range stages {
+		if stage.QPS <= maxBurstQPS {
+			boundedStages = append(boundedStages, stage)
+		}
+	}
+	if len(boundedStages) == 0 || boundedStages[len(boundedStages)-1].QPS != maxBurstQPS {
+		boundedStages = append(boundedStages, stageConfig{Name: fmt.Sprintf("Peak Burst - %d QPS", maxBurstQPS), QPS: maxBurstQPS})
+	}
+	stages = boundedStages
 
 	type stageResult struct {
 		StageName       string  `json:"stage_name"`
@@ -1376,7 +1520,7 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 	rateLimitActive := false
 
 	for idx, stg := range stages {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/4] Testing %s: firing %d UDP burst queries in 1 second..."}`, idx+1, stg.Name, stg.QPS)))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/%d] Testing %s: firing %d UDP burst queries in 1 second..."}`, idx+1, len(stages), stg.Name, stg.QPS)))
 
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
@@ -1394,7 +1538,7 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				resp, _, err := client.ExchangeContext(ctx, m, address)
+				resp, _, err := client.ExchangeContext(ctx, m.Copy(), address)
 				mu.Lock()
 				if err != nil {
 					dropped++
@@ -1451,8 +1595,8 @@ func (o *Orchestrator) runRRLThresholdScenario(ctx context.Context, test models.
 
 	if !rateLimitActive {
 		score = 50
-		statusText = "WARNING (NO RRL RATE LIMITING DETECTED AT 500 QPS)"
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Target responded to peak 500 QPS burst without enforcing Response Rate Limiting (RRL)."}`))
+		statusText = fmt.Sprintf("WARNING (NO RRL RATE LIMITING DETECTED AT %d QPS)", maxBurstQPS)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Target responded to peak %d QPS burst without enforcing Response Rate Limiting (RRL)."}`, maxBurstQPS)))
 	} else if slipDetected {
 		score = 100
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[EXCELLENT] RRL threshold identified at %d QPS with active SLIP TCP Fallback (TC=1)."}`, detectedThresholdQPS)))
@@ -1483,7 +1627,12 @@ func (o *Orchestrator) runDNSTunnelingScenario(ctx context.Context, test models.
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNS Covert Tunneling & Exfiltration Audit against domain: %s..."}`, domain)))
 
-	secretPayload := "DNStrikeSecretExfiltrationAuditDataPayload_987654321_ConfidentialToken_XYZ"
+	payloadBytes := 256
+	if value, ok := config["payload_bytes"].(float64); ok {
+		payloadBytes = int(value)
+	}
+	payloadSeed := "DNStrikeSyntheticAuditPayload_"
+	secretPayload := strings.Repeat(payloadSeed, (payloadBytes/len(payloadSeed))+1)[:payloadBytes]
 	chunkSize := 16
 	var chunks []string
 	for i := 0; i < len(secretPayload); i += chunkSize {
@@ -1497,6 +1646,7 @@ func (o *Orchestrator) runDNSTunnelingScenario(ctx context.Context, test models.
 	engine := dnsengine.NewQueryEngine(2 * time.Second)
 	sentChunks := 0
 	blockedChunks := 0
+	unverifiedChunks := 0
 	totalBytes := 0
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/2] Transmitting %d hex-encoded covert data chunks in subdomain queries..."}`, len(chunks))))
@@ -1505,31 +1655,40 @@ func (o *Orchestrator) runDNSTunnelingScenario(ctx context.Context, test models.
 		subdomain := fmt.Sprintf("chunk%d-%s.%s.", idx, chunk, domain)
 		q := models.DNSQuery{Domain: subdomain, QueryType: "TXT", Protocol: "udp"}
 		res, err := engine.Execute(ctx, target, q)
-		totalBytes += len(chunk)
+		totalBytes += len(chunk) / 2
 
-		if err != nil || res.RCode == 5 || res.RCode == 3 {
+		if err != nil {
+			unverifiedChunks++
+		} else if res.RCode == dns.RcodeRefused {
 			blockedChunks++
 		} else {
+			// NXDOMAIN still proves that the resolver accepted and processed the
+			// encoded name; it is not evidence of a DLP/firewall block.
 			sentChunks++
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if unverifiedChunks == len(chunks) {
+		return 0, nil, errors.New("DNS tunneling audit could not obtain any DNS response from target")
+	}
 
-	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[2/2] Exfiltration summary: %d/%d chunks passed through, %d blocked."}`, sentChunks, len(chunks), blockedChunks)))
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[2/2] Exfiltration summary: %d/%d chunks accepted, %d refused, %d unverified."}`, sentChunks, len(chunks), blockedChunks, unverifiedChunks)))
 
 	score := 100
 	statusText := "SECURE (COVERT TUNNELING BLOCKED)"
 
 	if sentChunks == len(chunks) {
 		score = 20
-		statusText = "HIGH VULNERABILITY (COVERT TUNNELING PASSED UNCHECKED)"
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[CRITICAL] All covert DNS tunneling payload chunks were successfully resolved without DLP/firewall blocking!"}`))
+		statusText = "HIGH RISK (ALL COVERT QUERIES ACCEPTED BY RESOLVER)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[CRITICAL] All covert DNS names were accepted by the resolver; authoritative delivery requires external telemetry to confirm."}`))
 	} else if sentChunks > 0 {
 		score = 60
-		statusText = "MEDIUM VULNERABILITY (PARTIAL TUNNELING PERMITTED)"
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Partial exfiltration detected (%d/%d chunks resolved)."}`, sentChunks, len(chunks))))
+		statusText = "MEDIUM RISK (SOME COVERT QUERIES ACCEPTED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Some covert DNS names were accepted (%d/%d); authoritative delivery is not proven."}`, sentChunks, len(chunks))))
+	} else if unverifiedChunks > 0 {
+		statusText = "PARTIAL AUDIT (RESPONSES UNVERIFIED)"
 	} else {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Covert tunneling queries were blocked or refused by target network security."}`))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Covert tunneling queries were explicitly refused by the DNS target."}`))
 	}
 
 	result := map[string]any{
@@ -1537,6 +1696,7 @@ func (o *Orchestrator) runDNSTunnelingScenario(ctx context.Context, test models.
 		"total_chunks":      len(chunks),
 		"delivered_chunks":  sentChunks,
 		"blocked_chunks":    blockedChunks,
+		"unverified_chunks": unverifiedChunks,
 		"total_bytes_sent":  totalBytes,
 		"entropy_rating":    "HIGH (HEX ENCODED)",
 		"status_summary":    statusText,
@@ -1564,6 +1724,10 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 	if val, ok := config["workers"].(float64); ok && val > 0 {
 		workers = int(val)
 	}
+	protocol := scenarioProtocol(target)
+	if err := verifyDNSBaseline(ctx, target, protocol); err != nil {
+		return 0, nil, fmt.Errorf("water torture baseline failed: %w", err)
+	}
 
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Water Torture (Random Subdomain NXDOMAIN Flood) against %s at %d QPS for %ds..."}`, domain, qps, durationSec)))
 
@@ -1571,7 +1735,7 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 	pool, err := dnsengine.NewWorkerPool(engine, dnsengine.PoolConfig{
 		Workers: workers,
 		QPS:     qps,
-		Burst:   qps / 5,
+		Burst:   burstSize(qps, 5),
 	})
 	if err != nil {
 		return 0, nil, err
@@ -1581,7 +1745,6 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 	defer cancelRun()
 
 	jobs := make(chan models.DNSQuery)
-
 	go func() {
 		defer close(jobs)
 		var sourceIPs []string
@@ -1603,7 +1766,7 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 				jobs <- models.DNSQuery{
 					Domain:    fmt.Sprintf("%s.%s.", randLabel, domain),
 					QueryType: "A",
-					Protocol:  "udp",
+					Protocol:  protocol,
 					SourceIP:  srcIP,
 				}
 			}
@@ -1618,6 +1781,9 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 	}
 
 	snap := collector.Snapshot(time.Now())
+	if snap.TotalQueries == 0 {
+		return 0, nil, errors.New("water torture scenario produced no DNS queries")
+	}
 	nxdomainCount := snap.ResponseCodes["NXDOMAIN"]
 	refusedCount := snap.ResponseCodes["REFUSED"]
 
@@ -1651,6 +1817,34 @@ func (o *Orchestrator) runWaterTortureScenario(ctx context.Context, test models.
 	return score, result, nil
 }
 
+func burstSize(qps, divisor int) int {
+	burst := qps / divisor
+	if burst < 1 {
+		return 1
+	}
+	return burst
+}
+
+func scenarioProtocol(target models.Target) string {
+	if target.UDPEnabled {
+		return "udp"
+	}
+	return "tcp"
+}
+
+func verifyDNSBaseline(ctx context.Context, target models.Target, protocol string) error {
+	engine := dnsengine.NewQueryEngine(2 * time.Second)
+	_, err := engine.Execute(ctx, target, models.DNSQuery{
+		Domain:    "example.com.",
+		QueryType: "A",
+		Protocol:  protocol,
+	})
+	if err != nil {
+		return errors.New("target did not return a DNS response")
+	}
+	return nil
+}
+
 // EDNS0 Client Subnet (ECS) Geo-Spoofing Audit Logic
 func (o *Orchestrator) runECSManipulationScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
 	domain := "example.com"
@@ -1674,24 +1868,41 @@ func (o *Orchestrator) runECSManipulationScenario(ctx context.Context, test mode
 	}
 
 	engine := dnsengine.NewQueryEngine(3 * time.Second)
+	protocol := scenarioProtocol(target)
 	ecsSupported := false
 	geoAnswers := make(map[string]string)
+	verifiedQueries := 0
+	unverifiedQueries := 0
 
 	for _, s := range subnets {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Injecting ECS Option: %s (%s)..."}`, s.Region, s.Subnet)))
 		q := models.DNSQuery{
 			Domain:       domain,
 			QueryType:    "A",
-			Protocol:     "udp",
+			Protocol:     protocol,
 			ClientSubnet: s.Subnet,
 		}
 		res, err := engine.Execute(ctx, target, q)
-		if err == nil && res.RCode == 0 {
-			ecsSupported = true
-			geoAnswers[s.Region] = fmt.Sprintf("RCode: %s (%dms)", res.RCodeName, int(res.LatencyMS))
+		if err == nil {
+			verifiedQueries++
 		} else {
-			geoAnswers[s.Region] = "No Response / Refused"
+			unverifiedQueries++
+			geoAnswers[s.Region] = "Unverified (query failed)"
+			continue
 		}
+		if res.RCode == dns.RcodeSuccess {
+			if res.ECSResponse {
+				ecsSupported = true
+				geoAnswers[s.Region] = fmt.Sprintf("ECS echoed, RCode: %s (%dms)", res.RCodeName, int(res.LatencyMS))
+			} else {
+				geoAnswers[s.Region] = fmt.Sprintf("Response received; ECS not echoed (%dms)", int(res.LatencyMS))
+			}
+		} else {
+			geoAnswers[s.Region] = fmt.Sprintf("Response received; RCode: %s", res.RCodeName)
+		}
+	}
+	if verifiedQueries == 0 {
+		return 0, nil, errors.New("ECS audit could not obtain any DNS response from target")
 	}
 
 	score := 100
@@ -1704,12 +1915,18 @@ func (o *Orchestrator) runECSManipulationScenario(ctx context.Context, test mode
 		statusText = "NOTICE (ECS OPTION NOT REFLECTED OR STRIPPED)"
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTE] Target DNS server stripped or ignored ECS options (privacy protection active)."}`))
 	}
+	if unverifiedQueries > 0 {
+		statusText = fmt.Sprintf("PARTIAL ECS AUDIT (%d OF %d QUERIES UNVERIFIED)", unverifiedQueries, len(subnets))
+	}
 
 	result := map[string]any{
-		"domain":        domain,
-		"ecs_supported": ecsSupported,
-		"geo_responses": geoAnswers,
-		"status_summary": statusText,
+		"domain":             domain,
+		"ecs_supported":      ecsSupported,
+		"verified_queries":   verifiedQueries,
+		"unverified_queries": unverifiedQueries,
+		"audit_complete":     unverifiedQueries == 0,
+		"geo_responses":      geoAnswers,
+		"status_summary":     statusText,
 	}
 
 	return score, result, nil
@@ -1725,32 +1942,42 @@ func (o *Orchestrator) runDNSSECAuditScenario(ctx context.Context, test models.T
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNSSEC Cryptographic & Health Audit for domain: %s..."}`, domain)))
 
 	engine := dnsengine.NewQueryEngine(3 * time.Second)
+	protocol := scenarioProtocol(target)
 
 	// 1. Query DNSKEY with DO bit
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/3] Querying DNSKEY records with DO (DNSSEC OK) flag..."}`))
-	keyRes, keyErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DNSKEY", Protocol: "udp", DNSSECOK: true})
+	keyRes, keyErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DNSKEY", Protocol: protocol, DNSSECOK: true})
 
 	// 2. Query DS record
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/3] Querying DS (Delegation Signer) records..."}`))
-	dsRes, dsErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DS", Protocol: "udp", DNSSECOK: true})
+	dsRes, dsErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "DS", Protocol: protocol, DNSSECOK: true})
 
 	// 3. Query SOA RRSIG
 	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[3/3] Querying SOA RRSIG cryptographic signatures..."}`))
-	soaRes, soaErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "SOA", Protocol: "udp", DNSSECOK: true})
+	soaRes, soaErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "SOA", Protocol: protocol, DNSSECOK: true})
+	verifiedQueries := 0
+	for _, queryErr := range []error{keyErr, dsErr, soaErr} {
+		if queryErr == nil {
+			verifiedQueries++
+		}
+	}
+	if verifiedQueries == 0 {
+		return 0, nil, errors.New("DNSSEC audit could not obtain any DNS response from target")
+	}
 
-	hasDNSKEY := keyErr == nil && keyRes.RCode == 0
-	hasDS := dsErr == nil && dsRes.RCode == 0
-	hasRRSIG := soaErr == nil && soaRes.RCode == 0
+	hasDNSKEY := keyErr == nil && containsString(keyRes.AnswerTypes, "DNSKEY")
+	hasDS := dsErr == nil && containsString(dsRes.AnswerTypes, "DS")
+	hasRRSIG := soaErr == nil && containsString(soaRes.AnswerTypes, "RRSIG")
 
 	score := 100
-	statusText := "DNSSEC FULLY ACTIVE & VALIDATED"
+	statusText := "DNSSEC RECORDS PRESENT"
 
 	if !hasDNSKEY && !hasDS {
 		score = 50
 		statusText = "NOTICE (DNSSEC NOT SIGNED FOR DOMAIN)"
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTICE] Target domain is not signed with DNSSEC (No DNSKEY/DS records returned)."} `))
 	} else if hasDNSKEY && hasRRSIG {
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[EXCELLENT] Target returned valid DNSKEY records and RRSIG signatures."}`))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target returned DNSKEY and RRSIG records. Cryptographic validation is outside this presence check."}`))
 	} else {
 		score = 75
 		statusText = "PARTIAL DNSSEC IMPLEMENTATION"
@@ -1758,12 +1985,23 @@ func (o *Orchestrator) runDNSSECAuditScenario(ctx context.Context, test models.T
 	}
 
 	result := map[string]any{
-		"domain":         domain,
-		"dnskey_present": hasDNSKEY,
-		"ds_present":     hasDS,
-		"rrsig_present":  hasRRSIG,
-		"status_summary": statusText,
+		"domain":           domain,
+		"dnskey_present":   hasDNSKEY,
+		"ds_present":       hasDS,
+		"rrsig_present":    hasRRSIG,
+		"verified_queries": verifiedQueries,
+		"audit_complete":   verifiedQueries == 3,
+		"status_summary":   statusText,
 	}
 
 	return score, result, nil
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }

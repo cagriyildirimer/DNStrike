@@ -88,7 +88,7 @@ export function NewTestPage() {
       
       {notice && <div className="notice" style={{ marginBottom: '1.5rem' }} onClick={() => setNotice('')}>{notice}</div>}
       
-      <div className="card-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+      <div className="test-config-layout">
         <section className="panel">
           <div className="panel-header">
             <div>
@@ -109,25 +109,13 @@ export function NewTestPage() {
             
             <div className="form-group" style={{ marginTop: '1.5rem' }}>
               <label>1. Attack Category</label>
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+              <div className="scenario-categories">
                 {categories.map(cat => (
                   <button
                     key={cat.id}
                     type="button"
                     onClick={() => handleCategoryChange(cat.id)}
-                    className="btn"
-                    style={{
-                      padding: '0.4rem 0.8rem',
-                      fontSize: '0.8rem',
-                      background: activeCategory === cat.id ? 'var(--accent-blue)' : 'rgba(255,255,255,0.05)',
-                      color: activeCategory === cat.id ? '#fff' : 'var(--text-secondary)',
-                      border: `1px solid ${activeCategory === cat.id ? 'var(--accent-blue)' : 'var(--border-color)'}`,
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.4rem'
-                    }}
+                    className={`scenario-category ${activeCategory === cat.id ? 'active' : ''}`}
                   >
                     <span>{cat.icon}</span>
                     <span>{cat.label}</span>
@@ -218,7 +206,7 @@ export function NewTestPage() {
                           <textarea 
                             className="form-control" 
                             rows={3}
-                            placeholder="api.example.com&#10;staging.example.com"
+                            placeholder="api&#10;staging"
                             value={Array.isArray(value) ? value.join('\n') : (typeof value === 'string' ? value : '')} 
                             onChange={e => {
                               const lines = e.target.value.split('\n').map(s => s.trim()).filter(Boolean);
@@ -280,7 +268,7 @@ export function NewTestPage() {
         </section>
 
         {selectedScenario && (
-          <section className="panel">
+          <section className="panel scenario-profile">
             <div className="panel-header" style={{ padding: '1.5rem' }}>
               <div>
                 <h2 style={{ fontSize: '1rem' }}>Scenario Profile</h2>

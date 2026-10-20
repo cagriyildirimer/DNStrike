@@ -34,6 +34,9 @@ func (e *QueryEngine) Execute(ctx context.Context, target models.Target, query m
 	result.Protocol = query.Protocol
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(query.Domain), queryTypes[query.QueryType])
+	if query.QueryClass == "CH" {
+		message.Question[0].Qclass = dns.ClassCHAOS
+	}
 	message.RecursionDesired = true
 	if query.EDNSPayload > 0 || query.DNSSECOK || query.ClientSubnet != "" {
 		payload := query.EDNSPayload
@@ -94,7 +97,27 @@ func (e *QueryEngine) Execute(ctx context.Context, target models.Target, query m
 		return failResult(result, models.QueryMalformedResponse, errors.New("failed to parse DNS response"))
 	}
 	result.ResponseSize = len(packed)
+	result.AnswerCount = len(response.Answer)
+	seenTypes := make(map[uint16]bool)
+	for _, answer := range response.Answer {
+		recordType := answer.Header().Rrtype
+		if !seenTypes[recordType] {
+			seenTypes[recordType] = true
+			if name := dns.TypeToString[recordType]; name != "" {
+				result.AnswerTypes = append(result.AnswerTypes, name)
+			}
+		}
+	}
 	result.Truncated = response.Truncated
+	result.RecursionAvailable = response.RecursionAvailable
+	if opt := response.IsEdns0(); opt != nil {
+		for _, option := range opt.Option {
+			if option.Option() == dns.EDNS0SUBNET {
+				result.ECSResponse = true
+				break
+			}
+		}
+	}
 	result.RCode = response.Rcode
 	result.RCodeName = dns.RcodeToString[response.Rcode]
 	if result.RCodeName == "" {
@@ -130,6 +153,13 @@ func validateQuery(target models.Target, query *models.DNSQuery) error {
 	query.QueryType = strings.ToUpper(strings.TrimSpace(query.QueryType))
 	if _, ok := queryTypes[query.QueryType]; !ok {
 		return errors.New("unsupported DNS query type")
+	}
+	query.QueryClass = strings.ToUpper(strings.TrimSpace(query.QueryClass))
+	if query.QueryClass == "" {
+		query.QueryClass = "IN"
+	}
+	if query.QueryClass != "IN" && query.QueryClass != "CH" {
+		return errors.New("DNS query class must be IN or CH")
 	}
 	if query.EDNSPayload > 0 && query.EDNSPayload < 512 {
 		return errors.New("EDNS payload must be at least 512")

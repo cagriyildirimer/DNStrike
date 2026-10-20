@@ -1,4 +1,4 @@
-import { CircleGauge, ShieldCheck, Activity, Terminal, ArrowRight } from 'lucide-react';
+import { ShieldCheck, Activity, Server, Gauge, FlaskConical } from 'lucide-react';
 import { PageHeader } from '../components/Layout/PageHeader';
 import { StatCard } from '../components/Layout/StatCard';
 import { Target, TestRun } from '../types';
@@ -14,11 +14,12 @@ export function DashboardPage({ targets, tests }: DashboardPageProps) {
   const running = tests.filter(x => x.status === 'RUNNING').length;
   const failed = tests.filter(x => x.status === 'FAILED').length;
 
-  const avgScore = completed > 0
-    ? Math.round(tests.filter(x => x.status === 'COMPLETED' && x.resilience_score !== null).reduce((acc, t) => acc + (t.resilience_score || 0), 0) / completed)
+  const scoredTests = tests.filter(x => x.status === 'COMPLETED' && x.resilience_score !== null && x.resilience_score !== undefined);
+  const avgScore = scoredTests.length > 0
+    ? Math.round(scoredTests.reduce((acc, t) => acc + (t.resilience_score ?? 0), 0) / scoredTests.length)
     : null;
 
-  const recentTests = [...tests].reverse().slice(0, 5);
+  const recentTests = tests.slice(0, 5);
 
   return (
     <>
@@ -32,21 +33,27 @@ export function DashboardPage({ targets, tests }: DashboardPageProps) {
         <StatCard 
           label="Total targets" 
           value={String(targets.length)} 
-          detail="Configured endpoints" 
+          detail="Configured endpoints"
+          icon={<Server size={18} />}
+          tone="cyan"
         />
         <StatCard 
           label="Total Tests" 
           value={String(tests.length)} 
-          detail={`${completed} finished, ${running} running, ${failed} failed`} 
+          detail={`${completed} finished, ${running} running, ${failed} failed`}
+          icon={<FlaskConical size={18} />}
+          tone="violet"
         />
         <StatCard 
           label="Avg Resilience Score" 
           value={avgScore !== null ? `${avgScore}/100` : 'N/A'} 
-          detail="Across completed tests" 
+          detail="Across completed tests"
+          icon={<Gauge size={18} />}
+          tone="emerald"
         />
       </section>
       
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+      <div className="dashboard-grid">
         <section className="panel">
           <div className="panel-header" style={{ padding: '1rem 1.5rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <h3 style={{ fontSize: '0.95rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

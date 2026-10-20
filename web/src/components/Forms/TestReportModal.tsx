@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { X, ShieldAlert, CheckCircle2, XCircle, Clock, Zap, Download } from 'lucide-react';
 import type { TestRun } from '../../types';
-import { generatePdfReport } from '../../utils/pdfGenerator';
 
 interface TestReportModalProps {
   test: TestRun;
@@ -28,15 +27,16 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
     }
   }
 
-  const downloadPdf = () => {
-    setGeneratingPdf(true);
-    try {
-      generatePdfReport(test);
-    } catch (e) {
-      console.error('Failed to generate PDF:', e);
-    } finally {
-      setTimeout(() => setGeneratingPdf(false), 500);
-    }
+  const downloadPdf = async () => {
+	setGeneratingPdf(true);
+	try {
+	  const { generatePdfReport } = await import('../../utils/pdfGenerator');
+	  generatePdfReport(test);
+	} catch (e) {
+	  console.error('Failed to generate PDF:', e);
+	} finally {
+	  setGeneratingPdf(false);
+	}
   };
 
   return (
@@ -104,7 +104,7 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
             </table>
           </div>
 
-          {test.result && test.scenario === 'amplification' && Boolean(test.result.amplification_results) && (
+          {test.result && test.scenario === 'amplification-audit' && Boolean(test.result.amplification_results) && (
             <>
               <h3 style={{ fontSize: '1rem', color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Zap size={16} style={{ color: 'var(--accent-amber)' }} /> Amplification & RRL Analysis

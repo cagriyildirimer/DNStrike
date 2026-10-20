@@ -3,7 +3,7 @@ services:
     build: .
     user: "${DNSTRIKE_UID:-1000}:${DNSTRIKE_GID:-1000}"
     environment:
-      DNSTRIKE_ADDR: 0.0.0.0:8080
+      DNSTRIKE_ADDR: 0.0.0.0:8888
       DNSTRIKE_DATA_DIR: /app/data
     network_mode: "host"
     cap_add:

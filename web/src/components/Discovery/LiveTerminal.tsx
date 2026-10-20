@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal, Activity, AlertTriangle, ArrowRight } from 'lucide-react';
+import { api } from '../../api';
 
 interface LiveTerminalProps {
   testId: number;
@@ -26,17 +27,36 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
   }, [logs]);
 
   useEffect(() => {
+    let disposed = false;
+    const syncPersistedStatus = async () => {
+      try {
+        const test = await api.getTest(testId);
+        if (disposed) return;
+        if (test.status === 'COMPLETED') {
+          updateStatus('COMPLETED');
+          setScore(test.resilience_score ?? null);
+        } else if (test.status === 'FAILED' || test.status === 'CANCELLED') {
+          updateStatus('FAILED');
+        } else if (test.status === 'RUNNING') {
+          updateStatus('RUNNING');
+        } else {
+          updateStatus('CONNECTING');
+        }
+      } catch {
+        // The WebSocket remains the primary live channel; retry on the next poll.
+      }
+    };
+    void syncPersistedStatus();
+    const statusPoll = window.setInterval(() => void syncPersistedStatus(), 1500);
+
     // Determine websocket URL
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname;
-    // For local dev, Vite runs on 5173 but API is on 8080. If port is 5173, force 8080.
-    const port = window.location.port === '5173' ? '8080' : window.location.port;
-    const wsUrl = `${protocol}//${host}${port ? ':'+port : ''}/ws/tests/${testId}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/tests/${testId}`;
     
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      updateStatus('RUNNING');
+      void syncPersistedStatus();
       setLogs(prev => [...prev, `[SYSTEM] Connected to Orchestrator stream for Test #${testId}`]);
     };
     
@@ -86,12 +106,13 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
     };
     
     return () => {
+      disposed = true;
+      window.clearInterval(statusPoll);
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [testId]);
+  }, [testId, updateStatus]);
 
   const hasLiveMetrics = ['benchmark', 'nxdomain', 'query-flood', 'random-subdomain', 'qps-ramp', 'water-torture'].includes(scenario);
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnstrike/dnstrike/internal/scenarios"
 	"github.com/dnstrike/dnstrike/pkg/models"
 )
 
@@ -42,7 +43,7 @@ func (f *fakeRepository) DeleteTest(_ context.Context, _ int64) error {
 type fakeTargets struct{ err error }
 
 func (f fakeTargets) GetTarget(context.Context, int64) (models.Target, error) {
-	return models.Target{ID: 1}, f.err
+	return models.Target{ID: 1, UDPEnabled: true, TCPEnabled: true}, f.err
 }
 
 type fakeScenarios map[string]models.ScenarioMetadata
@@ -64,6 +65,58 @@ func TestCreateTest(t *testing.T) {
 	}
 	if string(item.Config) != `{"qps":100}` {
 		t.Fatalf("unexpected config: %s", item.Config)
+	}
+}
+
+func TestCreateMergesDefaultsAndEnforcesLimits(t *testing.T) {
+	repo := &fakeRepository{}
+	metadata := models.ScenarioMetadata{
+		ID: "benchmark", SupportedProtocols: []string{"udp"},
+		DefaultConfig:     map[string]any{"qps": 100, "duration": 10, "workers": 4},
+		RecommendedLimits: models.Limits{MaxQPS: 500, MaxDuration: 30, MaxWorkers: 16},
+	}
+	service := NewService(repo, fakeTargets{}, fakeScenarios{"benchmark": metadata})
+	item, err := service.Create(context.Background(), models.CreateTestInput{TargetID: 1, Scenario: "benchmark", Config: json.RawMessage(`{"qps":25}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(item.Config, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["duration"] != float64(10) || config["workers"] != float64(4) {
+		t.Fatalf("defaults were not merged: %s", item.Config)
+	}
+	_, err = service.Create(context.Background(), models.CreateTestInput{TargetID: 1, Scenario: "benchmark", Config: json.RawMessage(`{"qps":501}`)})
+	if err == nil {
+		t.Fatal("expected QPS limit rejection")
+	}
+}
+
+func TestCreateRejectsInvalidSourcePool(t *testing.T) {
+	metadata := models.ScenarioMetadata{ID: "benchmark", SupportedProtocols: []string{"udp"}, DefaultConfig: map[string]any{"source_ip_pool": ""}}
+	service := NewService(&fakeRepository{}, fakeTargets{}, fakeScenarios{"benchmark": metadata})
+	_, err := service.Create(context.Background(), models.CreateTestInput{TargetID: 1, Scenario: "benchmark", Config: json.RawMessage(`{"source_ip_pool":"8.8.8.8"}`)})
+	if err == nil {
+		t.Fatal("expected public source IP rejection")
+	}
+}
+
+func TestDefaultScenarioConfigsAreValid(t *testing.T) {
+	for _, metadata := range scenarios.DefaultRegistry().List() {
+		t.Run(metadata.ID, func(t *testing.T) {
+			config := cloneConfig(metadata.DefaultConfig)
+			if metadata.ID == "query-flood" {
+				config["domain_list"] = []string{"example.test"}
+			}
+			raw, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := normalizeConfig(raw, metadata); err != nil {
+				t.Fatalf("invalid default config: %v", err)
+			}
+		})
 	}
 }
 

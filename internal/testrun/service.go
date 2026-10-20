@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
+
+	"github.com/dnstrike/dnstrike/internal/security"
 	"github.com/dnstrike/dnstrike/pkg/models"
 )
 
@@ -52,14 +57,19 @@ func (s *Service) Create(ctx context.Context, input models.CreateTestInput) (mod
 	if input.TargetID < 1 {
 		return models.Test{}, errors.New("select a valid target")
 	}
-	if _, err := s.targets.GetTarget(ctx, input.TargetID); err != nil {
+	target, err := s.targets.GetTarget(ctx, input.TargetID)
+	if err != nil {
 		return models.Test{}, err
 	}
 	input.Scenario = strings.TrimSpace(input.Scenario)
-	if _, ok := s.scenarios.Get(input.Scenario); !ok {
+	metadata, ok := s.scenarios.Get(input.Scenario)
+	if !ok {
 		return models.Test{}, errors.New("unsupported test scenario")
 	}
-	config, err := normalizeConfig(input.Config)
+	if !supportsEnabledProtocol(metadata, target) {
+		return models.Test{}, errors.New("target does not enable a protocol supported by this scenario")
+	}
+	config, err := normalizeConfig(input.Config, metadata)
 	if err != nil {
 		return models.Test{}, err
 	}
@@ -102,20 +112,212 @@ func (s *Service) Transition(ctx context.Context, id int64, next models.TestStat
 	return s.repo.GetTest(ctx, id)
 }
 
-func normalizeConfig(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 {
-		return json.RawMessage(`{}`), nil
+func normalizeConfig(raw json.RawMessage, metadata models.ScenarioMetadata) (json.RawMessage, error) {
+	value := cloneConfig(metadata.DefaultConfig)
+	if len(raw) > 0 {
+		var supplied map[string]any
+		if err := json.Unmarshal(raw, &supplied); err != nil {
+			return nil, errors.New("test config must be a valid JSON object")
+		}
+		if supplied == nil {
+			return nil, errors.New("test config must be a JSON object")
+		}
+		for key, item := range supplied {
+			value[key] = item
+		}
 	}
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, errors.New("test config must be a valid JSON object")
-	}
-	if value == nil {
-		return nil, errors.New("test config must be a JSON object")
+	if err := validateScenarioConfig(value, metadata); err != nil {
+		return nil, err
 	}
 	normalized, err := json.Marshal(value)
 	if err != nil {
 		return nil, errors.New("failed to process test config")
 	}
 	return normalized, nil
+}
+
+func cloneConfig(source map[string]any) map[string]any {
+	result := make(map[string]any, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func supportsEnabledProtocol(metadata models.ScenarioMetadata, target models.Target) bool {
+	if len(metadata.SupportedProtocols) == 0 {
+		return true
+	}
+	for _, protocol := range metadata.SupportedProtocols {
+		if (protocol == "udp" && target.UDPEnabled) || (protocol == "tcp" && target.TCPEnabled) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateScenarioConfig(config map[string]any, metadata models.ScenarioMetadata) error {
+	limits := metadata.RecommendedLimits
+	numericLimits := map[string]int{
+		"qps": limits.MaxQPS, "start_qps": limits.MaxQPS, "step_qps": limits.MaxQPS,
+		"max_qps": limits.MaxQPS, "max_burst_qps": limits.MaxQPS,
+		"duration": limits.MaxDuration, "step_duration": limits.MaxDuration,
+		"hold_duration": limits.MaxDuration, "workers": limits.MaxWorkers,
+		"connections": limits.MaxWorkers,
+	}
+	for key, maximum := range numericLimits {
+		if raw, exists := config[key]; exists {
+			value, ok := positiveInteger(raw)
+			if !ok {
+				return fmt.Errorf("%s must be a positive integer", key)
+			}
+			if maximum > 0 && value > maximum {
+				return fmt.Errorf("%s must not exceed %d", key, maximum)
+			}
+		}
+	}
+	if start, ok := configInteger(config, "start_qps"); ok {
+		if maximum, maxOK := configInteger(config, "max_qps"); maxOK && start > maximum {
+			return errors.New("start_qps must not exceed max_qps")
+		}
+	}
+	if start, startOK := configInteger(config, "start_qps"); startOK {
+		step, stepOK := configInteger(config, "step_qps")
+		maximum, maxOK := configInteger(config, "max_qps")
+		stepDuration, durationOK := configInteger(config, "step_duration")
+		if stepOK && maxOK && durationOK {
+			steps := ((maximum - start) / step) + 1
+			if steps*stepDuration > limits.MaxDuration {
+				return fmt.Errorf("QPS ramp total duration must not exceed %d seconds", limits.MaxDuration)
+			}
+		}
+	}
+	for _, key := range []string{"domain", "base_domain"} {
+		if raw, exists := config[key]; exists {
+			value, ok := raw.(string)
+			value = strings.TrimSpace(value)
+			if !ok || value == "" {
+				return fmt.Errorf("%s must be a non-empty domain name", key)
+			}
+			if _, valid := dns.IsDomainName(dns.Fqdn(value)); !valid {
+				return fmt.Errorf("%s is not a valid domain name", key)
+			}
+			config[key] = strings.TrimSuffix(value, ".")
+		}
+	}
+	if raw, exists := config["domain_list"]; exists {
+		values, ok := stringSlice(raw)
+		if !ok {
+			return errors.New("domain_list must be an array of domain names")
+		}
+		if len(values) == 0 || len(values) > 1000 {
+			return errors.New("domain_list must contain between 1 and 1000 domain names")
+		}
+		for _, domain := range values {
+			if _, valid := dns.IsDomainName(dns.Fqdn(strings.TrimSpace(domain))); !valid {
+				return fmt.Errorf("domain_list contains an invalid domain name: %s", domain)
+			}
+		}
+	}
+	if raw, exists := config["subdomains"]; exists {
+		values, ok := stringSlice(raw)
+		if !ok || len(values) == 0 || len(values) > 100 {
+			return errors.New("subdomains must contain between 1 and 100 labels")
+		}
+		for _, value := range values {
+			label := strings.TrimSpace(value)
+			if label == "" || strings.Contains(label, ".") || len(label) > 63 {
+				return fmt.Errorf("subdomains contains an invalid label: %s", value)
+			}
+			if _, valid := dns.IsDomainName(dns.Fqdn(label + ".example")); !valid {
+				return fmt.Errorf("subdomains contains an invalid label: %s", value)
+			}
+		}
+	}
+	if raw, exists := config["query_type"]; exists {
+		value, ok := raw.(string)
+		allowed := map[string]bool{"A": true, "AAAA": true, "MX": true, "TXT": true, "NS": true, "PTR": true, "SRV": true, "CNAME": true, "DNSKEY": true, "DS": true, "ANY": true, "SOA": true}
+		value = strings.ToUpper(strings.TrimSpace(value))
+		if !ok || !allowed[value] {
+			return errors.New("query_type is not supported")
+		}
+		config["query_type"] = value
+	}
+	if raw, exists := config["payload_bytes"]; exists {
+		value, ok := positiveInteger(raw)
+		if !ok || value > 4096 {
+			return errors.New("payload_bytes must be between 1 and 4096")
+		}
+	}
+	if raw, exists := config["source_ip_pool"]; exists {
+		pool, ok := raw.(string)
+		if !ok {
+			return errors.New("source_ip_pool must be a comma-separated string")
+		}
+		if err := validateSourceIPPool(pool); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func positiveInteger(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, value > 0
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 1 || value != math.Trunc(value) || value > float64(math.MaxInt) {
+			return 0, false
+		}
+		return int(value), true
+	default:
+		return 0, false
+	}
+}
+
+func stringSlice(raw any) ([]string, bool) {
+	switch values := raw.(type) {
+	case []string:
+		return values, true
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, item := range values {
+			value, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, value)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func configInteger(config map[string]any, key string) (int, bool) {
+	raw, exists := config[key]
+	if !exists {
+		return 0, false
+	}
+	return positiveInteger(raw)
+}
+
+func validateSourceIPPool(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	items := strings.Split(value, ",")
+	if len(items) > 256 {
+		return errors.New("source_ip_pool must not contain more than 256 addresses")
+	}
+	for _, item := range items {
+		ip := strings.TrimSpace(item)
+		if net.ParseIP(ip) == nil {
+			return fmt.Errorf("source_ip_pool contains an invalid IP address: %s", ip)
+		}
+		if err := security.ValidatePrivateIP(ip); err != nil {
+			return fmt.Errorf("source_ip_pool address %s is not private or local", ip)
+		}
+	}
+	return nil
 }

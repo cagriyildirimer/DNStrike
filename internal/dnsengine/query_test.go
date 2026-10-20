@@ -30,8 +30,11 @@ func TestQueryEngineUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RCode != dns.RcodeSuccess || result.ResponseSize == 0 || result.Protocol != "udp" || result.QueryType != "A" {
+	if result.RCode != dns.RcodeSuccess || result.ResponseSize == 0 || result.Protocol != "udp" || result.QueryType != "A" || result.AnswerCount != 1 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(result.AnswerTypes) != 1 || result.AnswerTypes[0] != "A" {
+		t.Fatalf("unexpected answer types: %#v", result.AnswerTypes)
 	}
 }
 
@@ -46,5 +49,28 @@ func TestQueryEngineRejectsDisabledProtocol(t *testing.T) {
 	result, err := NewQueryEngine(time.Second).Execute(context.Background(), models.Target{IPAddress: "127.0.0.1", Port: 53, TCPEnabled: true}, models.DNSQuery{Domain: "example.com", QueryType: "A", Protocol: "udp"})
 	if err == nil || result.ErrorClass != models.QueryValidation {
 		t.Fatalf("expected disabled protocol rejection, result=%#v err=%v", result, err)
+	}
+}
+
+func TestQueryEngineSendsChaosClass(t *testing.T) {
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &dns.Server{PacketConn: packetConn, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, request *dns.Msg) {
+		if request.Question[0].Qclass != dns.ClassCHAOS {
+			t.Errorf("query class = %d, want CHAOS", request.Question[0].Qclass)
+		}
+		response := new(dns.Msg)
+		response.SetReply(request)
+		_ = w.WriteMsg(response)
+	})}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = server.Shutdown() })
+	port := packetConn.LocalAddr().(*net.UDPAddr).Port
+	target := models.Target{IPAddress: "127.0.0.1", Port: port, UDPEnabled: true}
+	_, err = NewQueryEngine(time.Second).Execute(context.Background(), target, models.DNSQuery{Domain: "version.bind", QueryType: "TXT", QueryClass: "CH", Protocol: "udp"})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -152,7 +152,7 @@ React UI (Vite + TS) → Gin REST API (Go) → SQLite Persistence
 docker compose up -d --build
 
 # Open Web Interface
-http://localhost:8080
+http://localhost:8888
 ```
 
 ---

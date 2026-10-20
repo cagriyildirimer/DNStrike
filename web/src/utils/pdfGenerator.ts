@@ -2,6 +2,12 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import type { TestRun } from '../types';
 
+type JsPDFWithAutoTable = jsPDF & { lastAutoTable: { finalY: number } };
+
+function autoTableFinalY(doc: jsPDF): number {
+  return (doc as JsPDFWithAutoTable).lastAutoTable.finalY;
+}
+
 export function generatePdfReport(test: TestRun) {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -59,8 +65,7 @@ export function generatePdfReport(test: TestRun) {
     margin: { left: 15, right: 15 }
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-  currentY = (doc as any).lastAutoTable.finalY + 10;
+  currentY = autoTableFinalY(doc) + 10;
 
   // Section 2: Executive Summary
   doc.setFont('helvetica', 'bold');
@@ -252,8 +257,7 @@ export function generatePdfReport(test: TestRun) {
     margin: { left: 15, right: 15 }
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-  currentY = (doc as any).lastAutoTable.finalY + 10;
+  currentY = autoTableFinalY(doc) + 10;
 
   // Section 4: Detailed Execution Results
   if (test.result && Object.keys(test.result).length > 0) {
@@ -311,8 +315,7 @@ export function generatePdfReport(test: TestRun) {
       });
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-    currentY = (doc as any).lastAutoTable.finalY + 10;
+    currentY = autoTableFinalY(doc) + 10;
   }
 
   // Score Footer Box

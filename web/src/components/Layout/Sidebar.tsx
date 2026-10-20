@@ -33,11 +33,17 @@ export function Sidebar({ runningTestsCount }: { runningTestsCount: number }) {
       </div>
       
       <nav className="nav-menu">
-        <Nav to="/dashboard" icon={<LayoutDashboard size={20} />} label="Dashboard" />
-        <Nav to="/targets" icon={<Server size={20} />} label="Targets" />
-        <Nav to="/tests/new" icon={<Zap size={20} />} label="New Test" />
-        <Nav to="/tests/running" icon={<Activity size={20} />} label="Running Tests" badge={runningTestsCount > 0 ? String(runningTestsCount) : undefined} />
-        <Nav to="/tests/history" icon={<History size={20} />} label="Test History" />
+        <div className="nav-section">
+          <span className="nav-section-label">Workspace</span>
+          <Nav to="/dashboard" icon={<LayoutDashboard size={19} />} label="Dashboard" />
+          <Nav to="/targets" icon={<Server size={19} />} label="Targets" />
+        </div>
+        <div className="nav-section">
+          <span className="nav-section-label">Test operations</span>
+          <Nav to="/tests/new" icon={<Zap size={19} />} label="New Test" />
+          <Nav to="/tests/running" icon={<Activity size={19} />} label="Running Tests" badge={runningTestsCount > 0 ? String(runningTestsCount) : undefined} />
+          <Nav to="/tests/history" icon={<History size={19} />} label="Test History" />
+        </div>
       </nav>
       
       <div className="sidebar-footer">
