@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +31,21 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+	sourceIPPoolEnabled, err := envBool("DNSTRIKE_ENABLE_SOURCE_IP_POOL", false)
+	if err != nil {
+		logger.Error("source IP pool configuration", "error", err)
+		os.Exit(1)
+	}
+	maxConcurrentTests, err := envInt("DNSTRIKE_MAX_CONCURRENT_TESTS", 2, 1, 32)
+	if err != nil {
+		logger.Error("test concurrency configuration", "error", err)
+		os.Exit(1)
+	}
+	maxQueuedTests, err := envInt("DNSTRIKE_MAX_QUEUED_TESTS", 100, 1, 10000)
+	if err != nil {
+		logger.Error("test queue configuration", "error", err)
+		os.Exit(1)
+	}
 	dataDir := env("DNSTRIKE_DATA_DIR", "data")
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		logger.Error("data directory", "error", err)
@@ -46,15 +63,20 @@ func main() {
 	defer store.Close()
 	registry := scenarios.DefaultRegistry()
 	targetService := target.NewService(store)
-	testService := testrun.NewService(store, store, registry)
+	testService := testrun.NewService(store, store, registry, testrun.WithSourceIPPoolEnabled(sourceIPPoolEnabled), testrun.WithMaxQueuedTests(maxQueuedTests))
 	hub := websocket.NewHub()
-	
+
 	// Start Orchestrator
-	orchestrator := testrun.NewOrchestrator(testService, store, registry, hub)
+	orchestrator := testrun.NewOrchestrator(testService, store, registry, hub, maxConcurrentTests)
 	orchestrator.Start()
 	defer orchestrator.Stop()
-	
-	router := api.New(targetService, testService, dnsengine.NewDiscovery(3*time.Second), registry, hub, webui.Assets()).Router()
+
+	apiServer, err := api.New(targetService, testService, dnsengine.NewDiscovery(3*time.Second), registry, hub, webui.Assets(), os.Getenv("DNSTRIKE_API_KEY"))
+	if err != nil {
+		logger.Error("API authentication configuration", "error", err)
+		os.Exit(1)
+	}
+	router := apiServer.Router()
 	server := &http.Server{Addr: env("DNSTRIKE_ADDR", "127.0.0.1:8080"), Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		logger.Info("DNStrike listening", "address", server.Addr)
@@ -77,6 +99,30 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, errors.New(key + " must be true or false")
+	}
+	return parsed, nil
+}
+
+func envInt(key string, fallback, minimum, maximum int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, errors.New(key + " must be between " + strconv.Itoa(minimum) + " and " + strconv.Itoa(maximum))
+	}
+	return parsed, nil
 }
 
 func verifyWritableDirectory(path string) error {

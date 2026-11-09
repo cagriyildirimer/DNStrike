@@ -77,16 +77,24 @@ type Orchestrator struct {
 	hub       *ws.Hub
 	quit      chan struct{}
 	wg        sync.WaitGroup
+	slots     chan struct{}
+	run       func(models.Test)
 }
 
-func NewOrchestrator(tests *Service, targets TargetRepository, scenarios *scenarios.Registry, hub *ws.Hub) *Orchestrator {
-	return &Orchestrator{
+func NewOrchestrator(tests *Service, targets TargetRepository, scenarios *scenarios.Registry, hub *ws.Hub, maxConcurrent int) *Orchestrator {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	orchestrator := &Orchestrator{
 		tests:     tests,
 		targets:   targets,
 		scenarios: scenarios,
 		hub:       hub,
 		quit:      make(chan struct{}),
+		slots:     make(chan struct{}, maxConcurrent),
 	}
+	orchestrator.run = orchestrator.executeTest
+	return orchestrator
 }
 
 func (o *Orchestrator) Start() {
@@ -115,29 +123,43 @@ func (o *Orchestrator) loop() {
 }
 
 func (o *Orchestrator) pollPending() {
+	available := cap(o.slots) - len(o.slots)
+	if available < 1 {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pendingTests, err := o.tests.List(ctx, models.TestFilter{Status: models.TestPending, Limit: 10})
+	pendingTests, err := o.tests.List(ctx, models.TestFilter{Status: models.TestPending, Limit: available})
 	if err != nil {
 		slog.Error("orchestrator failed to list pending tests", "error", err)
 		return
 	}
 
 	for _, test := range pendingTests {
-		go o.executeTest(test.ID)
+		select {
+		case o.slots <- struct{}{}:
+		case <-o.quit:
+			return
+		default:
+			return
+		}
+		claimed, err := o.tests.Transition(ctx, test.ID, models.TestRunning, time.Now().UTC())
+		if err != nil {
+			<-o.slots
+			slog.Error("orchestrator failed to claim pending test", "test_id", test.ID, "error", err)
+			continue
+		}
+		go func(test models.Test) {
+			defer func() { <-o.slots }()
+			o.run(test)
+		}(claimed)
 	}
 }
 
-func (o *Orchestrator) executeTest(id int64) {
+func (o *Orchestrator) executeTest(test models.Test) {
 	ctx := context.Background() // Test runs independently of poller timeout
-
-	// Mark as running
-	test, err := o.tests.Transition(ctx, id, models.TestRunning, time.Now().UTC())
-	if err != nil {
-		slog.Error("orchestrator failed to transition to running", "test_id", id, "error", err)
-		return
-	}
+	id := test.ID
 
 	o.hub.Broadcast(fmt.Sprintf("%d", id), []byte(`{"type":"status_change","status":"RUNNING"}`))
 
@@ -167,6 +189,10 @@ func (o *Orchestrator) executeTest(id int64) {
 	// Parse and allocate Source IPs
 	var sourceIPs []string
 	if poolStr, ok := config["source_ip_pool"].(string); ok && poolStr != "" {
+		if !o.tests.SourceIPPoolEnabled() {
+			o.failTest(id, "source IP pool is disabled by server policy")
+			return
+		}
 		for _, ipStr := range strings.Split(poolStr, ",") {
 			ipStr = strings.TrimSpace(ipStr)
 			if ipStr != "" {
@@ -175,8 +201,8 @@ func (o *Orchestrator) executeTest(id int64) {
 		}
 	}
 
-	ipManager := dnsengine.NewIPManager()
 	if len(sourceIPs) > 0 {
+		ipManager := dnsengine.NewIPManager(true)
 		o.hub.Broadcast(fmt.Sprintf("%d", id), []byte(fmt.Sprintf(`{"type":"log","message":"Allocating %d Source IPs..."}`, len(sourceIPs))))
 		var allocated []string
 		for _, ip := range sourceIPs {

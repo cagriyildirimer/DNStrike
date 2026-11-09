@@ -14,7 +14,9 @@ COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/dnstrike ./cmd/server
 
 FROM alpine:3.22
-RUN addgroup -S dnstrike && adduser -S -G dnstrike dnstrike
+RUN apk add --no-cache iproute2 \
+    && addgroup -S dnstrike \
+    && adduser -S -G dnstrike dnstrike
 WORKDIR /app
 COPY --from=backend /out/dnstrike /usr/local/bin/dnstrike
 RUN mkdir -p /app/data /app/reports && chown -R dnstrike:dnstrike /app

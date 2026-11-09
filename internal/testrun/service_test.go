@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,13 +12,34 @@ import (
 	"github.com/dnstrike/dnstrike/pkg/models"
 )
 
-type fakeRepository struct{ item models.Test }
+type fakeRepository struct {
+	item          models.Test
+	rejectEnqueue bool
+}
 
 func (f *fakeRepository) CreateTest(_ context.Context, item *models.Test) error {
 	item.ID = 7
 	item.CreatedAt = time.Now().UTC()
 	f.item = *item
 	return nil
+}
+func (f *fakeRepository) EnqueueTest(ctx context.Context, item *models.Test, _ int) (bool, error) {
+	if f.rejectEnqueue {
+		return false, nil
+	}
+	if err := f.CreateTest(ctx, item); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func TestCreateRejectsFullQueue(t *testing.T) {
+	repo := &fakeRepository{rejectEnqueue: true}
+	service := NewService(repo, fakeTargets{}, fakeScenarios{"benchmark": {ID: "benchmark"}}, WithMaxQueuedTests(1))
+	_, err := service.Create(context.Background(), models.CreateTestInput{TargetID: 1, Scenario: "benchmark"})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("expected queue full error, got %v", err)
+	}
 }
 func (f *fakeRepository) ListTests(context.Context, models.TestFilter) ([]models.Test, error) {
 	return []models.Test{f.item}, nil
@@ -99,6 +121,21 @@ func TestCreateRejectsInvalidSourcePool(t *testing.T) {
 	_, err := service.Create(context.Background(), models.CreateTestInput{TargetID: 1, Scenario: "benchmark", Config: json.RawMessage(`{"source_ip_pool":"8.8.8.8"}`)})
 	if err == nil {
 		t.Fatal("expected public source IP rejection")
+	}
+}
+
+func TestCreateRequiresSourcePoolFeatureFlag(t *testing.T) {
+	metadata := models.ScenarioMetadata{ID: "benchmark", SupportedProtocols: []string{"udp"}, DefaultConfig: map[string]any{"source_ip_pool": ""}}
+	input := models.CreateTestInput{TargetID: 1, Scenario: "benchmark", Config: json.RawMessage(`{"source_ip_pool":"192.168.50.10"}`)}
+
+	disabled := NewService(&fakeRepository{}, fakeTargets{}, fakeScenarios{"benchmark": metadata})
+	if _, err := disabled.Create(context.Background(), input); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled source pool rejection, got %v", err)
+	}
+
+	enabled := NewService(&fakeRepository{}, fakeTargets{}, fakeScenarios{"benchmark": metadata}, WithSourceIPPoolEnabled(true))
+	if _, err := enabled.Create(context.Background(), input); err != nil {
+		t.Fatalf("expected enabled private source pool to be accepted, got %v", err)
 	}
 }
 

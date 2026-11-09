@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Radar, LayoutDashboard, Server, Zap, Activity, History, Settings, ShieldCheck } from 'lucide-react';
+import { Radar, LayoutDashboard, Server, Zap, Activity, History, Settings, ShieldCheck, LogOut } from 'lucide-react';
 
 interface NavProps {
   to: string;
@@ -19,7 +19,7 @@ function Nav({ to, icon, label, badge }: NavProps) {
   );
 }
 
-export function Sidebar({ runningTestsCount }: { runningTestsCount: number }) {
+export function Sidebar({ runningTestsCount, onLogout }: { runningTestsCount: number; onLogout: () => Promise<void> }) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -48,6 +48,10 @@ export function Sidebar({ runningTestsCount }: { runningTestsCount: number }) {
       
       <div className="sidebar-footer">
         <Nav to="/settings" icon={<Settings size={20} />} label="Settings" />
+        <button className="nav-item sidebar-logout" type="button" onClick={() => void onLogout()}>
+          <LogOut size={19} />
+          <span>Sign out</span>
+        </button>
         <div className="safety-card">
           <ShieldCheck size={20} />
           <div>

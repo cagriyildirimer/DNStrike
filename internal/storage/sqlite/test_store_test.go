@@ -70,3 +70,29 @@ func TestTransitionUsesOptimisticStatus(t *testing.T) {
 		t.Fatalf("expected optimistic transition rejection, got %v", err)
 	}
 }
+
+func TestEnqueueTestEnforcesPendingLimit(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	target := models.Target{Name: "DNS", IPAddress: "127.0.0.1", Port: 5353, UDPEnabled: true}
+	if err := store.CreateTarget(ctx, &target); err != nil {
+		t.Fatal(err)
+	}
+	first := models.Test{TargetID: target.ID, Scenario: "benchmark", Status: models.TestPending, Config: json.RawMessage(`{}`)}
+	accepted, err := store.EnqueueTest(ctx, &first, 1)
+	if err != nil || !accepted {
+		t.Fatalf("first enqueue accepted = %v, error = %v", accepted, err)
+	}
+	second := models.Test{TargetID: target.ID, Scenario: "benchmark", Status: models.TestPending, Config: json.RawMessage(`{}`)}
+	accepted, err = store.EnqueueTest(ctx, &second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted || second.ID != 0 {
+		t.Fatalf("expected second enqueue to be rejected, accepted = %v, id = %d", accepted, second.ID)
+	}
+}

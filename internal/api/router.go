@@ -26,17 +26,25 @@ type Server struct {
 	scenarios *scenarios.Registry
 	hub       *ws.Hub
 	assets    fs.FS
+	auth      *authenticator
 }
 
-func New(targets *target.Service, tests *testrun.Service, discovery *dnsengine.Discovery, scenarios *scenarios.Registry, hub *ws.Hub, assets fs.FS) *Server {
-	return &Server{targets: targets, tests: tests, discovery: discovery, scenarios: scenarios, hub: hub, assets: assets}
+func New(targets *target.Service, tests *testrun.Service, discovery *dnsengine.Discovery, scenarios *scenarios.Registry, hub *ws.Hub, assets fs.FS, apiKey string) (*Server, error) {
+	auth, err := newAuthenticator(apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{targets: targets, tests: tests, discovery: discovery, scenarios: scenarios, hub: hub, assets: assets, auth: auth}, nil
 }
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLog(), cors())
-	api := r.Group("/api")
-	api.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.GET("/api/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.POST("/api/auth/session", s.auth.createSession)
+	api := r.Group("/api", s.auth.require())
+	api.GET("/auth/session", s.auth.sessionStatus)
+	api.DELETE("/auth/session", s.auth.deleteSession)
 	api.GET("/targets", s.listTargets)
 	api.POST("/targets", s.createTarget)
 	api.GET("/targets/:id", s.getTarget)
@@ -47,7 +55,7 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/tests", s.listTests)
 	api.GET("/tests/:id", s.getTest)
 	api.DELETE("/tests/:id", s.deleteTest)
-	r.GET("/ws/tests/:id", s.hub.Serve)
+	r.GET("/ws/tests/:id", s.auth.require(), s.hub.Serve)
 	if s.assets != nil {
 		r.NoRoute(s.serveFrontend)
 	}
@@ -143,6 +151,10 @@ func (s *Server) createTest(c *gin.Context) {
 		return
 	}
 	test, err := s.tests.Create(c.Request.Context(), input)
+	if errors.Is(err, testrun.ErrQueueFull) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": gin.H{"code": "QUEUE_FULL", "message": "Test kuyruğu dolu; çalışan testlerin tamamlanmasını bekleyin."}})
+		return
+	}
 	if errors.Is(err, sqlite.ErrNotFound) {
 		notFound(c, "Target")
 		return
@@ -217,8 +229,9 @@ func cors() gin.HandlerFunc {
 		origin := c.GetHeader("Origin")
 		if strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "http://localhost:") {
 			c.Header("Access-Control-Allow-Origin", origin)
-			c.Header("Access-Control-Allow-Headers", "Content-Type")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-DNStrike-API-Key")
 			c.Header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+			c.Header("Access-Control-Allow-Credentials", "true")
 		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

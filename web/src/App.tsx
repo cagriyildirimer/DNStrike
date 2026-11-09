@@ -19,7 +19,7 @@ const emptyForm: TargetInput = {
   udp_enabled: true, tcp_enabled: true, tags: [] 
 };
 
-export default function App() {
+export default function App({ onLogout }: { onLogout: () => Promise<void> }) {
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<TargetInput>(emptyForm);
@@ -64,7 +64,7 @@ export default function App() {
 
   return (
     <div className="app-container">
-      <Sidebar runningTestsCount={runningCount} />
+      <Sidebar runningTestsCount={runningCount} onLogout={onLogout} />
       
       <main className="main-content">
         {notice && (

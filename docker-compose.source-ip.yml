@@ -1,0 +1,22 @@
+services:
+  dnstrike:
+    build: .
+    user: "0:0"
+    environment:
+      DNSTRIKE_ADDR: "${DNSTRIKE_ADDR:-127.0.0.1:8888}"
+      DNSTRIKE_DATA_DIR: /app/data
+      DNSTRIKE_API_KEY: "${DNSTRIKE_API_KEY:?DNSTRIKE_API_KEY must be set}"
+      DNSTRIKE_ENABLE_SOURCE_IP_POOL: "true"
+      DNSTRIKE_MAX_CONCURRENT_TESTS: "${DNSTRIKE_MAX_CONCURRENT_TESTS:-2}"
+      DNSTRIKE_MAX_QUEUED_TESTS: "${DNSTRIKE_MAX_QUEUED_TESTS:-100}"
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    restart: unless-stopped

@@ -213,6 +213,41 @@ func (s *Store) CreateTest(ctx context.Context, test *models.Test) error {
 	return err
 }
 
+func (s *Store) EnqueueTest(ctx context.Context, test *models.Test, maxQueued int) (bool, error) {
+	if maxQueued < 1 {
+		return false, errors.New("kuyruk limiti en az 1 olmalı")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var queued int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM tests WHERE status=?", models.TestPending).Scan(&queued); err != nil {
+		return false, fmt.Errorf("test kuyruğu sayma: %w", err)
+	}
+	if queued >= maxQueued {
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `INSERT INTO tests(target_id,scenario,status,created_at,duration,config_json) VALUES(?,?,?,?,?,?)`,
+		test.TargetID, test.Scenario, test.Status, now.Format(time.RFC3339Nano), test.DurationSeconds, string(test.Config))
+	if err != nil {
+		return false, fmt.Errorf("test kuyruğa ekleme: %w", err)
+	}
+	test.ID, err = result.LastInsertId()
+	if err != nil {
+		return false, err
+	}
+	test.CreatedAt = now
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) ListTests(ctx context.Context, filter models.TestFilter) ([]models.Test, error) {
 	query := strings.Builder{}
 	query.WriteString(`SELECT id,target_id,scenario,status,created_at,started_at,finished_at,duration,config_json,resilience_score,result_summary_json FROM tests WHERE 1=1`)
@@ -315,12 +350,12 @@ func (s *Store) DeleteTest(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	
+
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return ErrNotFound
 	}
-	
+
 	return tx.Commit()
 }
 

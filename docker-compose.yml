@@ -3,11 +3,18 @@ services:
     build: .
     user: "${DNSTRIKE_UID:-1000}:${DNSTRIKE_GID:-1000}"
     environment:
-      DNSTRIKE_ADDR: 0.0.0.0:8888
+      DNSTRIKE_ADDR: 0.0.0.0:8080
       DNSTRIKE_DATA_DIR: /app/data
-    network_mode: "host"
-    cap_add:
-      - NET_ADMIN
+      DNSTRIKE_API_KEY: "${DNSTRIKE_API_KEY:?DNSTRIKE_API_KEY must be set}"
+      DNSTRIKE_ENABLE_SOURCE_IP_POOL: "false"
+      DNSTRIKE_MAX_CONCURRENT_TESTS: "${DNSTRIKE_MAX_CONCURRENT_TESTS:-2}"
+      DNSTRIKE_MAX_QUEUED_TESTS: "${DNSTRIKE_MAX_QUEUED_TESTS:-100}"
+    ports:
+      - "127.0.0.1:${DNSTRIKE_PORT:-8888}:8080"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports

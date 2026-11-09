@@ -148,12 +148,36 @@ React UI (Vite + TS) → Gin REST API (Go) → SQLite Persistence
 ## 🚀 Quick Start (Docker)
 
 ```bash
-# Clone repository and launch containers
+# Generate a strong key for the current shell and launch containers
+export DNSTRIKE_API_KEY="$(openssl rand -hex 32)"
 docker compose up -d --build
 
 # Open Web Interface
 http://localhost:8888
 ```
+
+The default Compose configuration uses a bridge network, publishes the UI only
+on `127.0.0.1`, drops all Linux capabilities, and disables source-IP aliasing.
+Set `DNSTRIKE_PORT` to change the local published port.
+
+### Advanced source-IP pool mode
+
+Source-IP aliases require host networking and `NET_ADMIN`. This mode can modify
+the host network namespace and must only be used on a dedicated, isolated test
+host. It is deliberately separated from the default deployment:
+
+```bash
+export DNSTRIKE_API_KEY="$(openssl rand -hex 32)"
+docker compose -f docker-compose.source-ip.yml up -d --build
+```
+
+The advanced deployment listens on `127.0.0.1:8888` unless `DNSTRIKE_ADDR` is
+explicitly overridden. Docker does not make `NET_ADMIN` effective for the
+image's non-root user, so this dedicated mode runs as UID 0 after dropping all
+capabilities and adding back only `NET_ADMIN`; `no-new-privileges` remains
+enabled. Treat it as a high-risk laboratory mode. Setting
+`DNSTRIKE_ENABLE_SOURCE_IP_POOL=true` without the required process capability
+does not bypass operating-system permissions; allocation will fail safely.
 
 ---
 
@@ -165,8 +189,34 @@ Requires Go 1.24+ and Node.js 24+.
 # Install dependencies & run server
 go mod download
 cd web && npm install && npm run build && cd ..
-go run ./cmd/server
+DNSTRIKE_API_KEY="$(openssl rand -hex 32)" go run ./cmd/server
 ```
+
+Source-IP pool configuration is rejected by default. For an authorized,
+isolated local environment it can be enabled with
+`DNSTRIKE_ENABLE_SOURCE_IP_POOL=true`; the process must also have the narrowly
+scoped operating-system permission required to manage address aliases.
+
+Test scheduling is bounded independently of per-scenario QPS limits:
+
+- `DNSTRIKE_MAX_CONCURRENT_TESTS` controls active tests (default `2`, range `1-32`).
+- `DNSTRIKE_MAX_QUEUED_TESTS` controls pending tests (default `100`, range `1-10000`).
+
+When the pending queue is full, `POST /api/tests` returns HTTP `429` with the
+`QUEUE_FULL` error code.
+
+DNStrike requires `DNSTRIKE_API_KEY` to contain at least 32 characters. The web
+interface exchanges this key for an eight-hour, signed `HttpOnly` session
+cookie; the key is not stored in browser storage. API clients can instead send
+the key with either of these headers:
+
+```text
+Authorization: Bearer <DNSTRIKE_API_KEY>
+X-DNStrike-API-Key: <DNSTRIKE_API_KEY>
+```
+
+`GET /api/health` and `POST /api/auth/session` are public. All other REST and
+WebSocket endpoints require authentication.
 
 ---
 
@@ -175,6 +225,9 @@ go run ./cmd/server
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Service health |
+| `POST` | `/api/auth/session` | Exchange an API key for a browser session |
+| `GET` | `/api/auth/session` | Check the current authenticated session |
+| `DELETE` | `/api/auth/session` | End the current browser session |
 | `GET` | `/api/targets` | List targets |
 | `POST` | `/api/targets` | Create and validate a target |
 | `GET` | `/api/targets/:id` | Fetch a target |

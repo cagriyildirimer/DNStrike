@@ -16,10 +16,15 @@ import (
 	"github.com/dnstrike/dnstrike/pkg/models"
 )
 
-var ErrInvalidTransition = errors.New("invalid test status transition")
+var (
+	ErrInvalidTransition = errors.New("invalid test status transition")
+	ErrQueueFull         = errors.New("test queue is full")
+)
+
+const defaultMaxQueuedTests = 100
 
 type Repository interface {
-	CreateTest(context.Context, *models.Test) error
+	EnqueueTest(context.Context, *models.Test, int) (bool, error)
 	ListTests(context.Context, models.TestFilter) ([]models.Test, error)
 	GetTest(context.Context, int64) (models.Test, error)
 	TransitionTest(context.Context, int64, models.TestStatus, models.TestStatus, time.Time) error
@@ -36,13 +41,37 @@ type ScenarioRegistry interface {
 }
 
 type Service struct {
-	repo      Repository
-	targets   TargetRepository
-	scenarios ScenarioRegistry
+	repo                Repository
+	targets             TargetRepository
+	scenarios           ScenarioRegistry
+	sourceIPPoolEnabled bool
+	maxQueuedTests      int
 }
 
-func NewService(repo Repository, targets TargetRepository, scenarios ScenarioRegistry) *Service {
-	return &Service{repo: repo, targets: targets, scenarios: scenarios}
+type ServiceOption func(*Service)
+
+func WithSourceIPPoolEnabled(enabled bool) ServiceOption {
+	return func(service *Service) { service.sourceIPPoolEnabled = enabled }
+}
+
+func WithMaxQueuedTests(maximum int) ServiceOption {
+	return func(service *Service) {
+		if maximum > 0 {
+			service.maxQueuedTests = maximum
+		}
+	}
+}
+
+func NewService(repo Repository, targets TargetRepository, scenarios ScenarioRegistry, options ...ServiceOption) *Service {
+	service := &Service{repo: repo, targets: targets, scenarios: scenarios, maxQueuedTests: defaultMaxQueuedTests}
+	for _, option := range options {
+		option(service)
+	}
+	return service
+}
+
+func (s *Service) SourceIPPoolEnabled() bool {
+	return s.sourceIPPoolEnabled
 }
 
 func (s *Service) SaveResult(ctx context.Context, id int64, score int, result json.RawMessage) error {
@@ -73,11 +102,27 @@ func (s *Service) Create(ctx context.Context, input models.CreateTestInput) (mod
 	if err != nil {
 		return models.Test{}, err
 	}
+	if !s.sourceIPPoolEnabled && sourceIPPoolConfigured(config) {
+		return models.Test{}, errors.New("source_ip_pool is disabled; set DNSTRIKE_ENABLE_SOURCE_IP_POOL=true only in an authorized isolated environment")
+	}
 	test := models.Test{TargetID: input.TargetID, Scenario: input.Scenario, Status: models.TestPending, Config: config}
-	if err := s.repo.CreateTest(ctx, &test); err != nil {
+	accepted, err := s.repo.EnqueueTest(ctx, &test, s.maxQueuedTests)
+	if err != nil {
 		return models.Test{}, err
 	}
+	if !accepted {
+		return models.Test{}, ErrQueueFull
+	}
 	return test, nil
+}
+
+func sourceIPPoolConfigured(config json.RawMessage) bool {
+	var value map[string]any
+	if json.Unmarshal(config, &value) != nil {
+		return false
+	}
+	pool, ok := value["source_ip_pool"].(string)
+	return ok && strings.TrimSpace(pool) != ""
 }
 
 func (s *Service) List(ctx context.Context, filter models.TestFilter) ([]models.Test, error) {
