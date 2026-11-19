@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
@@ -152,6 +153,12 @@ func (o *Orchestrator) pollPending() {
 		}
 		go func(test models.Test) {
 			defer func() { <-o.slots }()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("orchestrator recovered from panic during test execution", "test_id", test.ID, "panic", r)
+					o.failTest(test.ID, "internal error during test execution")
+				}
+			}()
 			o.run(test)
 		}(claimed)
 	}
@@ -181,7 +188,7 @@ func (o *Orchestrator) executeTest(test models.Test) {
 		return
 	}
 
-	// Route to specific implementation based on category
+	// Scenario execution results, populated by the dispatched handler below.
 	var execErr error
 	var score int
 	var result map[string]any
@@ -219,39 +226,13 @@ func (o *Orchestrator) executeTest(test models.Test) {
 
 	slog.Info("orchestrator starting scenario", "test_id", id, "scenario", test.Scenario)
 
-	switch meta.Category {
-	case "audit":
-		if meta.ID == "amplification-audit" {
-			score, result, execErr = o.runAmplificationAuditScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "zone-transfer-audit" {
-			score, result, execErr = o.runZoneTransferAuditScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "dns-fuzzing" {
-			score, result, execErr = o.runDNSFuzzingScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "subdomain-takeover" {
-			score, result, execErr = o.runSubdomainTakeoverScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "rrl-threshold" {
-			score, result, execErr = o.runRRLThresholdScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "dns-tunneling" {
-			score, result, execErr = o.runDNSTunnelingScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "ecs-manipulation" {
-			score, result, execErr = o.runECSManipulationScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "dnssec-audit" {
-			score, result, execErr = o.runDNSSECAuditScenario(ctx, test, target, meta, config)
-		} else {
-			score, result, execErr = o.runAuditScenario(ctx, test, target, meta, config)
-		}
-	case "performance", "volume":
-		if meta.ID == "tcp-slowloris" {
-			score, result, execErr = o.runTCPSlowlorisScenario(ctx, test, target, meta, config)
-		} else if meta.ID == "water-torture" {
-			score, result, execErr = o.runWaterTortureScenario(ctx, test, target, meta, config)
-		} else {
-			score, result, execErr = o.runPerformanceScenario(ctx, test, target, meta, config)
-		}
-	case "resolver-cache":
-		score, result, execErr = o.runCacheScenario(ctx, test, target, meta, config)
-	default:
-		execErr = fmt.Errorf("unsupported category: %s", meta.Category)
+	// Dispatch to the scenario's handler. Registration lives in a single table
+	// (scenarioHandlers), kept in sync with the metadata catalog by
+	// TestScenarioHandlerParity.
+	if handler, ok := scenarioHandlers[meta.ID]; ok {
+		score, result, execErr = handler(o, ctx, test, target, meta, config)
+	} else {
+		execErr = fmt.Errorf("unsupported scenario: %s", meta.ID)
 	}
 
 	if execErr != nil {
@@ -653,7 +634,7 @@ func (o *Orchestrator) runPerformanceScenario(ctx context.Context, test models.T
 					domain := "example.com"
 
 					if val, ok := config["domain_list"].([]any); ok && len(val) > 0 {
-						idx := time.Now().UnixNano() % int64(len(val))
+						idx := rand.IntN(len(val))
 						if strVal, isStr := val[idx].(string); isStr {
 							domain = strVal
 						}
@@ -1385,6 +1366,7 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 	cnameFoundCount := 0
 	verifiedQueries := 0
 	failedQueries := 0
+	inconclusiveChecks := 0
 
 	udpClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
@@ -1422,20 +1404,30 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 					}
 				}
 
-				// Check if the CNAME target resolves or returns NXDOMAIN/Timeout (Dangling pointer)
+				// Check whether the CNAME target resolves or returns NXDOMAIN
+				// (a dangling pointer). The external target can only be judged
+				// when the queried server actually performed recursion for it;
+				// an NXDOMAIN from a server that does not recurse for external
+				// names proves nothing, so that case is reported as unverified
+				// rather than a false-positive takeover finding.
 				targetRes, targetErr := engine.Execute(ctx, target, models.DNSQuery{Domain: cnameTarget, QueryType: "A", Protocol: "udp"})
 
-				isDangling := targetErr == nil && targetRes.RCode == dns.RcodeNameError
-
-				itemStatus := "SAFE (RESOLVING)"
-				if isDangling {
+				var itemStatus string
+				switch {
+				case targetErr != nil:
+					itemStatus = "UNVERIFIED (LOOKUP FAILED)"
+					inconclusiveChecks++
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] CNAME target %s could not be verified because its lookup failed."}`, cnameTarget)))
+				case targetRes.RCode == dns.RcodeNameError && targetRes.RecursionAvailable:
 					vulnerableCount++
 					itemStatus = "VULNERABLE (DANGLING CNAME)"
-					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Dangling CNAME detected on %s -> %s (%s)! Target returns NXDOMAIN."}`, fqdn, cnameTarget, detectedProvider)))
-				} else if targetErr != nil {
-					itemStatus = "UNVERIFIED (LOOKUP FAILED)"
-					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] CNAME target %s could not be verified because its lookup failed."}`, cnameTarget)))
-				} else {
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[CRITICAL] Dangling CNAME detected on %s -> %s (%s)! Recursive resolver returns NXDOMAIN."}`, fqdn, cnameTarget, detectedProvider)))
+				case targetRes.RCode == dns.RcodeNameError:
+					itemStatus = "UNVERIFIED (NO RECURSION TO CONFIRM)"
+					inconclusiveChecks++
+					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] CNAME target %s returned NXDOMAIN but the server is not recursive for external names; cannot confirm a dangling takeover."}`, cnameTarget)))
+				default:
+					itemStatus = "SAFE (RESOLVING)"
 					o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] CNAME found for %s -> %s (%s). Target resolves normally."}`, fqdn, cnameTarget, detectedProvider)))
 				}
 
@@ -1461,23 +1453,24 @@ func (o *Orchestrator) runSubdomainTakeoverScenario(ctx context.Context, test mo
 			score = 0
 		}
 		statusText = fmt.Sprintf("HIGH RISK (%d DANGLING CNAMEs FOUND)", vulnerableCount)
-	} else if failedQueries > 0 {
-		statusText = fmt.Sprintf("PARTIAL SCAN (%d OF %d QUERIES UNVERIFIED)", failedQueries, len(subdomains))
+	} else if failedQueries > 0 || inconclusiveChecks > 0 {
+		statusText = fmt.Sprintf("PARTIAL SCAN (%d OF %d QUERIES UNVERIFIED)", failedQueries+inconclusiveChecks, len(subdomains))
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Scan completed partially; one or more subdomain lookups could not be verified."}`))
 	} else if cnameFoundCount == 0 {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Scan completed. No CNAME records were found for tested subdomains."}`))
 	}
 
 	result := map[string]any{
-		"domain":             domain,
-		"subdomains_scanned": len(subdomains),
-		"cnames_found":       cnameFoundCount,
-		"vulnerable_count":   vulnerableCount,
-		"verified_queries":   verifiedQueries,
-		"unverified_queries": failedQueries,
-		"scan_complete":      failedQueries == 0,
-		"status_summary":     statusText,
-		"scan_results":       results,
+		"domain":              domain,
+		"subdomains_scanned":  len(subdomains),
+		"cnames_found":        cnameFoundCount,
+		"vulnerable_count":    vulnerableCount,
+		"verified_queries":    verifiedQueries,
+		"unverified_queries":  failedQueries,
+		"inconclusive_checks": inconclusiveChecks,
+		"scan_complete":       failedQueries == 0 && inconclusiveChecks == 0,
+		"status_summary":      statusText,
+		"scan_results":        results,
 	}
 
 	return score, result, nil
@@ -2001,7 +1994,7 @@ func (o *Orchestrator) runDNSSECAuditScenario(ctx context.Context, test models.T
 	if !hasDNSKEY && !hasDS {
 		score = 50
 		statusText = "NOTICE (DNSSEC NOT SIGNED FOR DOMAIN)"
-		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTICE] Target domain is not signed with DNSSEC (No DNSKEY/DS records returned)."} `))
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTICE] Target domain is not signed with DNSSEC (No DNSKEY/DS records returned)."}`))
 	} else if hasDNSKEY && hasRRSIG {
 		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Target returned DNSKEY and RRSIG records. Cryptographic validation is outside this presence check."}`))
 	} else {

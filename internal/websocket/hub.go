@@ -15,15 +15,19 @@ type safeConn struct {
 	mu sync.Mutex
 }
 
+const writeWait = 5 * time.Second
+
 func (s *safeConn) WriteMessage(messageType int, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return s.Conn.WriteMessage(messageType, data)
 }
 
 func (s *safeConn) WriteJSON(v interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return s.Conn.WriteJSON(v)
 }
 
@@ -106,10 +110,18 @@ func (h *Hub) Serve(c *gin.Context) {
 }
 
 func (h *Hub) Broadcast(testID string, message []byte) {
+	// Snapshot the connection set under the lock, then write without holding it.
+	// A slow or dead client must not block broadcasts to other clients, nor the
+	// registration/deregistration of connections. Combined with the write
+	// deadline in safeConn.WriteMessage, this bounds head-of-line blocking.
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
+	conns := make([]*safeConn, 0, len(h.clients[testID]))
 	for conn := range h.clients[testID] {
+		conns = append(conns, conn)
+	}
+	h.mu.RUnlock()
+
+	for _, conn := range conns {
 		_ = conn.WriteMessage(websocket.TextMessage, message)
 	}
 }

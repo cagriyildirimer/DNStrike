@@ -142,34 +142,17 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, "SELECT id FROM tests WHERE target_id=?", id)
-	if err == nil {
-		var testIDs []string
-		for rows.Next() {
-			var tid int
-			if err := rows.Scan(&tid); err == nil {
-				testIDs = append(testIDs, fmt.Sprintf("%d", tid))
-			}
+	// Remove dependent rows first. Using a correlated subquery on target_id keeps
+	// the statements parameterized and lets a query failure propagate instead of
+	// being silently swallowed (which previously risked leaving orphaned child
+	// rows or hitting a foreign-key failure on the targets delete).
+	for _, table := range []string{"test_results", "metrics", "findings", "reports"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE test_id IN (SELECT id FROM tests WHERE target_id=?)", id); err != nil {
+			return fmt.Errorf("target bağımlı kayıt silme (%s): %w", table, err)
 		}
-		rows.Close()
-		if len(testIDs) > 0 {
-			inClause := strings.Join(testIDs, ",")
-			if _, err := tx.ExecContext(ctx, "DELETE FROM test_results WHERE test_id IN ("+inClause+")"); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM metrics WHERE test_id IN ("+inClause+")"); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM findings WHERE test_id IN ("+inClause+")"); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM reports WHERE test_id IN ("+inClause+")"); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM tests WHERE target_id=?", id); err != nil {
-				return err
-			}
-		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tests WHERE target_id=?", id); err != nil {
+		return fmt.Errorf("target testleri silme: %w", err)
 	}
 
 	r, err := tx.ExecContext(ctx, `DELETE FROM targets WHERE id=?`, id)
@@ -296,13 +279,24 @@ func (s *Store) GetTest(ctx context.Context, id int64) (models.Test, error) {
 }
 
 func (s *Store) TransitionTest(ctx context.Context, id int64, from, to models.TestStatus, at time.Time) error {
+	finishedAt := at.UTC().Format(time.RFC3339Nano)
 	var result sql.Result
 	var err error
 	switch to {
 	case models.TestRunning:
-		result, err = s.db.ExecContext(ctx, `UPDATE tests SET status=?,started_at=? WHERE id=? AND status=?`, to, at.UTC().Format(time.RFC3339Nano), id, from)
+		result, err = s.db.ExecContext(ctx, `UPDATE tests SET status=?,started_at=? WHERE id=? AND status=?`, to, finishedAt, id, from)
 	case models.TestCompleted, models.TestFailed, models.TestCancelled:
-		result, err = s.db.ExecContext(ctx, `UPDATE tests SET status=?,finished_at=?,duration=CASE WHEN started_at IS NULL OR started_at='' THEN duration ELSE CAST(strftime('%s',?)-strftime('%s',started_at) AS INTEGER) END WHERE id=? AND status=?`, to, at.UTC().Format(time.RFC3339Nano), at.UTC().Format(time.RFC3339Nano), id, from)
+		// Compute the duration in Go rather than with SQLite's strftime('%s', ...),
+		// which does not reliably parse RFC3339 timestamps carrying nanosecond
+		// precision and a 'Z' suffix (it could yield a wrong or zero duration).
+		// The MaxOpenConns=1 pool serializes access and the `status=?` guard keeps
+		// this read-then-update safe against concurrent transitions.
+		duration, ok := s.computeDuration(ctx, id, from, at)
+		if ok {
+			result, err = s.db.ExecContext(ctx, `UPDATE tests SET status=?,finished_at=?,duration=? WHERE id=? AND status=?`, to, finishedAt, duration, id, from)
+		} else {
+			result, err = s.db.ExecContext(ctx, `UPDATE tests SET status=?,finished_at=? WHERE id=? AND status=?`, to, finishedAt, id, from)
+		}
 	default:
 		return errors.New("desteklenmeyen test durumu")
 	}
@@ -317,6 +311,29 @@ func (s *Store) TransitionTest(ctx context.Context, id int64, from, to models.Te
 		return ErrNotFound
 	}
 	return nil
+}
+
+// computeDuration returns the elapsed seconds between the test's stored
+// started_at and the supplied finish time. It returns ok=false when the test
+// has no usable start timestamp, in which case the caller should leave the
+// existing duration untouched.
+func (s *Store) computeDuration(ctx context.Context, id int64, from models.TestStatus, at time.Time) (int, bool) {
+	var started sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at FROM tests WHERE id=? AND status=?`, id, from).Scan(&started); err != nil {
+		return 0, false
+	}
+	if !started.Valid || started.String == "" {
+		return 0, false
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, started.String)
+	if err != nil {
+		return 0, false
+	}
+	seconds := int(at.UTC().Sub(startedAt).Seconds())
+	if seconds < 0 {
+		seconds = 0
+	}
+	return seconds, true
 }
 
 func (s *Store) UpdateTestResult(ctx context.Context, id int64, score int, result json.RawMessage) error {
