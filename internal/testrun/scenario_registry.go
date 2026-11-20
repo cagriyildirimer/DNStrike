@@ -33,6 +33,10 @@ var scenarioHandlers = map[string]scenarioHandler{
 	"ecs-manipulation":    (*Orchestrator).runECSManipulationScenario,
 	"dnssec-audit":        (*Orchestrator).runDNSSECAuditScenario,
 	"any-refuse-audit":    (*Orchestrator).runANYRefusalAuditScenario,
+	"dns-cookie-audit":    (*Orchestrator).runDNSCookieAuditScenario,
+	"cache-snooping":      (*Orchestrator).runCacheSnoopingScenario,
+	"edns-tcp-fallback":   (*Orchestrator).runEDNSComplianceScenario,
+	"dns-0x20":            (*Orchestrator).runDNS0x20Scenario,
 	// performance
 	"benchmark": (*Orchestrator).runPerformanceScenario,
 	"qps-ramp":  (*Orchestrator).runQPSRampScenario,

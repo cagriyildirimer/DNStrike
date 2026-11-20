@@ -2106,6 +2106,334 @@ func (o *Orchestrator) runANYRefusalAuditScenario(ctx context.Context, test mode
 	return score, result, nil
 }
 
+// DNS Cookie (RFC 7873) Anti-Spoofing Audit Logic.
+//
+// DNS Cookies are a lightweight transaction mechanism: the client sends an 8-byte
+// client cookie in an EDNS0 option and a cooperating server returns an additional
+// server cookie that the client must echo on later queries. This defeats most
+// off-path spoofing and blunts the server's usefulness as an amplification
+// reflector. This audit sends a client cookie and inspects whether the server
+// returns a server cookie or enforces it with BADCOOKIE.
+func (o *Orchestrator) runDNSCookieAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNS Cookie (RFC 7873) Anti-Spoofing Audit for domain: %s..."}`, domain)))
+
+	protocol := scenarioProtocol(target)
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	client := &dns.Client{Net: protocol, Timeout: 3 * time.Second}
+
+	clientCookie := fmt.Sprintf("%016x", rand.Uint64())
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(domain), dns.TypeSOA)
+	msg.RecursionDesired = true
+	msg.SetEdns0(1232, false)
+	if opt := msg.IsEdns0(); opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: clientCookie})
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[1/1] Sending query with 8-byte client COOKIE %s..."}`, clientCookie)))
+	resp, _, err := client.ExchangeContext(ctx, msg, address)
+	if err != nil || resp == nil {
+		return 0, nil, fmt.Errorf("DNS cookie audit could not obtain a response from target: %w", err)
+	}
+
+	badCookie := resp.Rcode == dns.RcodeBadCookie
+	cookieEchoed := false
+	serverCookiePresent := false
+	if ropt := resp.IsEdns0(); ropt != nil {
+		for _, option := range ropt.Option {
+			if c, ok := option.(*dns.EDNS0_COOKIE); ok {
+				cookieEchoed = true
+				// A full cookie is the 16-hex client cookie plus an 8..32 byte
+				// server cookie, so anything longer carries a server cookie.
+				if len(c.Cookie) > 16 {
+					serverCookiePresent = true
+				}
+				break
+			}
+		}
+	}
+
+	score := 100
+	statusText := ""
+	switch {
+	case badCookie && serverCookiePresent:
+		statusText = "ENFORCED (BADCOOKIE + SERVER COOKIE ISSUED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Server enforces DNS Cookies (BADCOOKIE challenge with server cookie) — off-path spoofing strongly mitigated."}`))
+	case serverCookiePresent:
+		statusText = "SUPPORTED (SERVER COOKIE RETURNED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Server returned a DNS server cookie — RFC 7873 anti-spoofing supported."}`))
+	case cookieEchoed:
+		score = 80
+		statusText = "PARTIAL (COOKIE OPTION ECHOED WITHOUT SERVER COOKIE)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[NOTE] Server echoed the COOKIE option but issued no server cookie; anti-spoofing protection is incomplete."}`))
+	default:
+		score = 60
+		statusText = "NOT SUPPORTED (OFF-PATH SPOOFING / AMPLIFICATION EXPOSURE)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Server ignores DNS Cookies — exposed to off-path spoofing and reflection/amplification abuse."}`))
+	}
+
+	result := map[string]any{
+		"domain":                domain,
+		"client_cookie":         clientCookie,
+		"cookie_echoed":         cookieEchoed,
+		"server_cookie_present": serverCookiePresent,
+		"bad_cookie_enforced":   badCookie,
+		"rcode":                 dns.RcodeToString[resp.Rcode],
+		"status_summary":        statusText,
+	}
+
+	return score, result, nil
+}
+
+// Cache Snooping (RD=0) Audit Logic.
+//
+// A recursive resolver that answers non-recursive (RD=0) queries straight from
+// its cache leaks which names its clients have been resolving — an information
+// disclosure and a strong signal of an openly reachable resolver. This audit
+// sends RD=0 queries for well-known third-party names and counts how many are
+// served from cache.
+func (o *Orchestrator) runCacheSnoopingScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	probes := []string{"google.com", "facebook.com", "amazon.com", "cloudflare.com", "microsoft.com", "youtube.com", "netflix.com", "wikipedia.org"}
+	if configured, ok := stringSlice(config["probe_domains"]); ok && len(configured) > 0 {
+		probes = configured
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting Cache Snooping (RD=0) Audit across %d probe names..."}`, len(probes))))
+
+	protocol := scenarioProtocol(target)
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	client := &dns.Client{Net: protocol, Timeout: 3 * time.Second}
+
+	type probeResult struct {
+		Domain string `json:"domain"`
+		Status string `json:"status"`
+	}
+	var probeResults []probeResult
+	answered := 0
+	failed := 0
+	var cached []string
+
+	for idx, name := range probes {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[%d/%d] Probing cache for %s (RD=0)..."}`, idx+1, len(probes), name)))
+		msg := new(dns.Msg)
+		msg.SetQuestion(dns.Fqdn(name), dns.TypeA)
+		msg.RecursionDesired = false
+		resp, _, err := client.ExchangeContext(ctx, msg, address)
+		if err != nil || resp == nil {
+			failed++
+			probeResults = append(probeResults, probeResult{Domain: name, Status: "query failed"})
+			continue
+		}
+		answered++
+		if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
+			cached = append(cached, name)
+			probeResults = append(probeResults, probeResult{Domain: name, Status: "CACHED (served from cache, RD=0)"})
+			o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[LEAK] %s is present in cache and served without recursion."}`, name)))
+		} else {
+			probeResults = append(probeResults, probeResult{Domain: name, Status: fmt.Sprintf("not cached (RCode %s, %d answers)", dns.RcodeToString[resp.Rcode], len(resp.Answer))})
+		}
+	}
+
+	if answered == 0 {
+		return 0, nil, errors.New("cache snooping audit could not obtain any DNS response from target")
+	}
+
+	score := 100
+	statusText := "NOT SNOOPABLE (RD=0 QUERIES NOT SERVED FROM CACHE)"
+	if len(cached) > 0 {
+		ratio := float64(len(cached)) / float64(answered)
+		switch {
+		case ratio >= 0.5:
+			score = 50
+		case ratio >= 0.25:
+			score = 70
+		default:
+			score = 85
+		}
+		statusText = fmt.Sprintf("CACHE SNOOPING EXPOSED (%d OF %d PROBES SERVED FROM CACHE)", len(cached), answered)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] %d of %d probe names were served from cache without recursion — cache snooping / information disclosure exposure."}`, len(cached), answered)))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] No probe names were served from cache; resolver is not snoopable via RD=0 queries."}`))
+	}
+
+	result := map[string]any{
+		"probes_total":    len(probes),
+		"probes_answered": answered,
+		"probes_failed":   failed,
+		"cached_count":    len(cached),
+		"cached_names":    cached,
+		"audit_complete":  failed == 0,
+		"probe_results":   probeResults,
+		"status_summary":  statusText,
+	}
+
+	return score, result, nil
+}
+
+// EDNS0 & TCP Fallback Compliance Audit Logic.
+//
+// Modern DNS relies on EDNS0 to advertise a larger UDP buffer and on TCP fallback
+// when a response is truncated (TC=1). A server without EDNS0, or one that
+// truncates but cannot deliver the answer over TCP, forces IP fragmentation or
+// drops large responses — the preconditions for SAD DNS and general compatibility
+// failures. This audit probes EDNS0 support and the TC=1 -> TCP fallback path.
+func (o *Orchestrator) runEDNSComplianceScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting EDNS0 & TCP Fallback Compliance Audit for domain: %s..."}`, domain)))
+
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	udpClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
+	tcpClient := &dns.Client{Net: "tcp", Timeout: 3 * time.Second}
+
+	// 1. EDNS0 support probe over UDP with a large advertised buffer.
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/3] Probing EDNS0 support (UDP, 4096-byte buffer)..."}`))
+	m1 := new(dns.Msg)
+	m1.SetQuestion(dns.Fqdn(domain), dns.TypeSOA)
+	m1.RecursionDesired = true
+	m1.SetEdns0(4096, false)
+	r1, _, e1 := udpClient.ExchangeContext(ctx, m1, address)
+	ednsSupported := e1 == nil && r1 != nil && r1.IsEdns0() != nil
+
+	// 2. Truncation probe: small UDP buffer with a DNSSEC-OK DNSKEY query to
+	//    elicit a large answer and observe TC=1.
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/3] Forcing truncation (UDP, 512-byte buffer, DNSKEY+DO)..."}`))
+	m2 := new(dns.Msg)
+	m2.SetQuestion(dns.Fqdn(domain), dns.TypeDNSKEY)
+	m2.RecursionDesired = true
+	m2.SetEdns0(512, true)
+	r2, _, e2 := udpClient.ExchangeContext(ctx, m2, address)
+	truncationObserved := e2 == nil && r2 != nil && r2.Truncated
+
+	if e1 != nil && e2 != nil {
+		return 0, nil, fmt.Errorf("EDNS/TCP compliance audit could not obtain any UDP response: %w", e1)
+	}
+
+	// 3. TCP fallback probe for the large response.
+	tcpChecked := false
+	tcpFallbackOK := false
+	if target.TCPEnabled {
+		tcpChecked = true
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[3/3] Verifying TCP fallback for large responses (TCP, DNSKEY+DO)..."}`))
+		m3 := new(dns.Msg)
+		m3.SetQuestion(dns.Fqdn(domain), dns.TypeDNSKEY)
+		m3.RecursionDesired = true
+		m3.SetEdns0(4096, true)
+		r3, _, e3 := tcpClient.ExchangeContext(ctx, m3, address)
+		tcpFallbackOK = e3 == nil && r3 != nil
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[3/3] TCP is not enabled for this target; TCP fallback left unverified."}`))
+	}
+
+	score := 100
+	statusText := "EDNS0 COMPLIANT (LARGE-RESPONSE DELIVERY HEALTHY)"
+	switch {
+	case !ednsSupported:
+		score = 60
+		statusText = "NO EDNS0 SUPPORT (LEGACY — FRAGMENTATION & COMPATIBILITY RISK)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Server did not return an EDNS0 OPT record — legacy behavior exposes it to fragmentation attacks and modern-feature loss."}`))
+	case tcpChecked && truncationObserved && !tcpFallbackOK:
+		score = 70
+		statusText = "EDNS0 OK BUT TCP FALLBACK FAILED (LARGE-RESPONSE DELIVERY RISK)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[WARNING] Responses truncate (TC=1) but the TCP fallback did not return an answer — large responses may be undeliverable."}`))
+	case !tcpChecked:
+		statusText = "EDNS0 SUPPORTED (TCP FALLBACK UNVERIFIED — TCP DISABLED)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] EDNS0 supported. TCP fallback could not be verified because TCP is disabled for this target."}`))
+	default:
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] EDNS0 supported and large-response delivery (TC=1 -> TCP fallback) is healthy."}`))
+	}
+
+	result := map[string]any{
+		"domain":              domain,
+		"edns_supported":      ednsSupported,
+		"truncation_observed": truncationObserved,
+		"tcp_checked":         tcpChecked,
+		"tcp_fallback_ok":     tcpFallbackOK,
+		"status_summary":      statusText,
+	}
+
+	return score, result, nil
+}
+
+// randomizeCase flips the case of ASCII letters at random, producing the
+// mixed-case query name used by the DNS-0x20 audit.
+func randomizeCase(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			if rand.IntN(2) == 0 {
+				b[i] = c ^ 0x20
+			}
+		}
+	}
+	return string(b)
+}
+
+// DNS-0x20 Case Encoding Audit Logic.
+//
+// DNS-0x20 mixes the case of a query name as extra transaction entropy against
+// off-path spoofing; it only works if the server echoes the exact casing it was
+// sent back in the question section. This audit sends a mixed-case name and
+// checks whether the casing survives in the echo. A server that normalizes case
+// cannot carry 0x20 entropy for anything downstream of it.
+func (o *Orchestrator) runDNS0x20Scenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	sentName := dns.Fqdn(randomizeCase(domain))
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting DNS-0x20 Case Encoding Audit with mixed-case name %s..."}`, sentName)))
+
+	protocol := scenarioProtocol(target)
+	address := net.JoinHostPort(target.IPAddress, fmt.Sprintf("%d", target.Port))
+	client := &dns.Client{Net: protocol, Timeout: 3 * time.Second}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(sentName, dns.TypeA)
+	msg.RecursionDesired = true
+
+	resp, _, err := client.ExchangeContext(ctx, msg, address)
+	if err != nil || resp == nil || len(resp.Question) == 0 {
+		return 0, nil, fmt.Errorf("DNS-0x20 audit could not obtain a usable response from target: %w", err)
+	}
+
+	echoedName := resp.Question[0].Name
+	if !strings.EqualFold(echoedName, sentName) {
+		return 0, nil, fmt.Errorf("DNS-0x20 audit received a mismatched question name (sent %q, got %q)", sentName, echoedName)
+	}
+	casePreserved := echoedName == sentName
+
+	score := 100
+	statusText := "0x20 CASE PRESERVED (ANTI-SPOOFING ENTROPY INTACT)"
+	if !casePreserved {
+		score = 85
+		statusText = "CASE NORMALIZED (NO 0x20 ECHO — REDUCED SPOOFING ENTROPY)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[NOTE] Server normalized query casing (echoed %s); it cannot carry DNS-0x20 anti-spoofing entropy."}`, echoedName)))
+	} else {
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Server echoed the exact mixed-case query name — DNS-0x20 entropy is preserved."}`))
+	}
+
+	result := map[string]any{
+		"domain":         domain,
+		"sent_name":      sentName,
+		"echoed_name":    echoedName,
+		"case_preserved": casePreserved,
+		"rcode":          dns.RcodeToString[resp.Rcode],
+		"status_summary": statusText,
+	}
+
+	return score, result, nil
+}
+
 func containsString(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {
