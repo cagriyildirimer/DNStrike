@@ -2016,6 +2016,96 @@ func (o *Orchestrator) runDNSSECAuditScenario(ctx context.Context, test models.T
 	return score, result, nil
 }
 
+// ANY Query Minimization (RFC 8482) Audit Logic.
+//
+// A legacy resolver answers QTYPE=ANY by expanding every RRset it holds for the
+// name, which inflates the response and makes the server an attractive DNS
+// amplification reflector. RFC 8482 lets a server minimize that by refusing ANY
+// (REFUSED/NOTIMP) or by returning a single synthetic HINFO RR. This audit sends
+// an ANY query, compares its size against a baseline A query, and scores the
+// amplification exposure.
+func (o *Orchestrator) runANYRefusalAuditScenario(ctx context.Context, test models.Test, target models.Target, meta models.ScenarioMetadata, config map[string]any) (int, map[string]any, error) {
+	domain := "example.com"
+	if val, ok := config["domain"].(string); ok && val != "" {
+		domain = val
+	}
+
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"Starting ANY Query Minimization (RFC 8482) Audit for domain: %s..."}`, domain)))
+
+	engine := dnsengine.NewQueryEngine(3 * time.Second)
+	protocol := scenarioProtocol(target)
+
+	// 1. Baseline A query establishes the size of an ordinary answer.
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[1/2] Sending baseline A query to establish normal response size..."}`))
+	baseRes, baseErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "A", Protocol: protocol})
+
+	// 2. ANY query reveals how the server treats QTYPE=ANY.
+	o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[2/2] Sending QTYPE=ANY query (RFC 8482 minimization check)..."}`))
+	anyRes, anyErr := engine.Execute(ctx, target, models.DNSQuery{Domain: domain, QueryType: "ANY", Protocol: protocol})
+	if anyErr != nil {
+		return 0, nil, fmt.Errorf("ANY minimization audit could not obtain a response for QTYPE=ANY: %w", anyErr)
+	}
+
+	refused := anyRes.RCode == dns.RcodeRefused || anyRes.RCode == dns.RcodeNotImplemented
+	hinfoMinimal := containsString(anyRes.AnswerTypes, "HINFO")
+
+	baselineVerified := baseErr == nil && baseRes.ResponseSize > 0
+	amplification := 0.0
+	baselineSize := 0
+	if baselineVerified {
+		baselineSize = baseRes.ResponseSize
+		amplification = float64(anyRes.ResponseSize) / float64(baseRes.ResponseSize)
+	}
+
+	score := 100
+	statusText := ""
+
+	switch {
+	case refused:
+		statusText = fmt.Sprintf("MINIMAL (ANY REFUSED: %s)", anyRes.RCodeName)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[OK] Server refuses QTYPE=ANY (%s) — minimal amplification surface."}`, anyRes.RCodeName)))
+	case hinfoMinimal:
+		statusText = "MINIMAL (RFC 8482 SYNTHETIC HINFO RESPONSE)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Server returns an RFC 8482 synthetic HINFO response to ANY queries."}`))
+	case anyRes.AnswerCount <= 1:
+		score = 95
+		statusText = "LOW EXPOSURE (ANY RETURNS A SINGLE RRSET)"
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(`{"type":"log","message":"[OK] Server answers ANY with a single RRset; amplification surface is small."}`))
+	case !baselineVerified:
+		score = 70
+		statusText = fmt.Sprintf("ANY FULLY ANSWERED (%d RRsets, baseline unavailable)", anyRes.AnswerCount)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Server expands ANY into %d RRsets; baseline A query failed so amplification factor is unavailable."}`, anyRes.AnswerCount)))
+	default:
+		switch {
+		case amplification >= 6:
+			score = 40
+		case amplification >= 3:
+			score = 60
+		case amplification >= 2:
+			score = 75
+		default:
+			score = 90
+		}
+		statusText = fmt.Sprintf("ANY FULLY ANSWERED (amplification ~%.1fx, %d RRsets)", amplification, anyRes.AnswerCount)
+		o.hub.Broadcast(fmt.Sprintf("%d", test.ID), []byte(fmt.Sprintf(`{"type":"log","message":"[WARNING] Server expands ANY to ~%.1fx the baseline response size (%d bytes vs %d bytes) — amplification exposure."}`, amplification, anyRes.ResponseSize, baselineSize)))
+	}
+
+	result := map[string]any{
+		"domain":               domain,
+		"any_rcode":            anyRes.RCodeName,
+		"any_refused":          refused,
+		"rfc8482_hinfo":        hinfoMinimal,
+		"any_answer_count":     anyRes.AnswerCount,
+		"any_response_size":    anyRes.ResponseSize,
+		"baseline_size":        baselineSize,
+		"baseline_verified":    baselineVerified,
+		"amplification_factor": amplification,
+		"status_summary":       statusText,
+	}
+
+	return score, result, nil
+}
+
 func containsString(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {
