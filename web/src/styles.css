@@ -947,6 +947,68 @@ tbody tr:hover {
   color: #ff003c;
 }
 
+.live-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.75rem;
+  background: #0c0c0c;
+  border-bottom: 1px solid #333;
+  padding: 0.85rem 1rem;
+}
+
+.spark-card {
+  background: #141414;
+  border: 1px solid #262626;
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+  min-width: 0;
+}
+
+.spark-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+}
+
+.spark-label {
+  color: #7a7a7a;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.spark-val {
+  font-family: 'ui-monospace', monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.spark-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-family: 'ui-monospace', monospace;
+  font-size: 0.7rem;
+  color: #aaa;
+  white-space: nowrap;
+}
+
+.spark-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 0.2rem;
+  vertical-align: middle;
+}
+
+.spark-svg {
+  display: block;
+}
+
 .terminal-window {
   padding: 1rem;
   height: 400px;

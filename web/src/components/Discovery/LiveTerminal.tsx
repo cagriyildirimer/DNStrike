@@ -1,15 +1,33 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Terminal, Activity, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Terminal } from 'lucide-react';
 import { api } from '../../api';
+import { Sparkline } from './Sparkline';
 
 interface LiveTerminalProps {
   testId: number;
   scenario: string;
 }
 
+interface MetricPoint {
+  qps: number;
+  avg: number;
+  p50: number;
+  p99: number;
+  errors: number;
+  loss: number;
+  total: number;
+}
+
+const MAX_POINTS = 90;
+
+const toNumber = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
 export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
   const [logs, setLogs] = useState<string[]>([]);
-  const [metrics, setMetrics] = useState({ qps: 0, errors: 0, loss: 0, latency: 0 });
+  const [series, setSeries] = useState<MetricPoint[]>([]);
   const [status, setStatus] = useState<'CONNECTING' | 'RUNNING' | 'COMPLETED' | 'FAILED'>('CONNECTING');
   const [score, setScore] = useState<number | null>(null);
   
@@ -68,14 +86,22 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
           case 'log':
             setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${data.message}`]);
             break;
-          case 'metric':
-            setMetrics({
-              qps: data.qps,
-              errors: data.errors,
-              loss: data.loss || 0,
-              latency: data.avg_latency_ms
+          case 'metric': {
+            const point: MetricPoint = {
+              qps: toNumber(data.qps),
+              avg: toNumber(data.avg_latency_ms),
+              p50: toNumber(data.p50_latency_ms),
+              p99: toNumber(data.p99_latency_ms),
+              errors: toNumber(data.errors),
+              loss: toNumber(data.loss),
+              total: toNumber(data.total_queries),
+            };
+            setSeries(prev => {
+              const next = [...prev, point];
+              return next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
             });
             break;
+          }
           case 'status_change':
             if (data.status === 'RUNNING') updateStatus('RUNNING');
             break;
@@ -114,7 +140,9 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
     };
   }, [testId, updateStatus]);
 
-  const hasLiveMetrics = ['benchmark', 'nxdomain', 'query-flood', 'random-subdomain', 'qps-ramp', 'water-torture'].includes(scenario);
+  // Charts appear whenever the scenario actually streams metric frames, rather
+  // than relying on a hardcoded scenario allowlist.
+  const last = series.length > 0 ? series[series.length - 1] : null;
 
   return (
     <div className="live-terminal-container">
@@ -128,35 +156,71 @@ export function LiveTerminal({ testId, scenario }: LiveTerminalProps) {
         </div>
       </div>
       
-      {hasLiveMetrics && status !== 'CONNECTING' && (
-        <div className="live-metrics-bar">
-          <div className="live-metric">
-            <span className="label">QPS Sent</span>
-            <span className="value">
-              <Activity size={14} /> {metrics.qps}
-            </span>
+      {last && (
+        <>
+          <div className="live-metrics-bar">
+            <div className="live-metric">
+              <span className="label">Total Queries</span>
+              <span className="value">{last.total.toLocaleString()}</span>
+            </div>
+            <div className="live-metric">
+              <span className="label">QPS</span>
+              <span className="value">{last.qps.toFixed(0)}</span>
+            </div>
+            <div className="live-metric">
+              <span className="label">Avg Latency</span>
+              <span className="value">{last.avg.toFixed(2)} ms</span>
+            </div>
+            <div className="live-metric">
+              <span className="label">P99 Latency</span>
+              <span className="value">{last.p99.toFixed(2)} ms</span>
+            </div>
           </div>
-          <div className="live-metric">
-            <span className="label">Avg Latency</span>
-            <span className="value">
-              <ArrowRight size={14} /> {metrics.latency.toFixed(2)} ms
-            </span>
+
+          <div className="live-charts">
+            <div className="spark-card">
+              <div className="spark-head">
+                <span className="spark-label">Queries / sec</span>
+                <span className="spark-val" style={{ color: '#00f0ff' }}>{last.qps.toFixed(0)}</span>
+              </div>
+              <Sparkline series={[{ label: 'QPS', color: '#00f0ff', values: series.map(p => p.qps) }]} />
+            </div>
+
+            <div className="spark-card">
+              <div className="spark-head">
+                <span className="spark-label">Latency (ms)</span>
+                <span className="spark-legend">
+                  <span><i style={{ background: '#00f0ff' }} />avg {last.avg.toFixed(1)}</span>
+                  <span><i style={{ background: 'var(--accent-amber)' }} />p99 {last.p99.toFixed(1)}</span>
+                </span>
+              </div>
+              <Sparkline
+                series={[
+                  { label: 'avg latency', color: '#00f0ff', values: series.map(p => p.avg) },
+                  { label: 'p99 latency', color: '#f59e0b', values: series.map(p => p.p99) },
+                ]}
+              />
+            </div>
+
+            <div className="spark-card">
+              <div className="spark-head">
+                <span className="spark-label">Errors / Loss</span>
+                <span className="spark-legend">
+                  <span><i style={{ background: 'var(--accent-red)' }} />err {last.errors}</span>
+                  <span><i style={{ background: 'var(--accent-amber)' }} />loss {last.loss}</span>
+                </span>
+              </div>
+              <Sparkline
+                series={[
+                  { label: 'errors', color: '#ef4444', values: series.map(p => p.errors) },
+                  { label: 'loss', color: '#f59e0b', values: series.map(p => p.loss) },
+                ]}
+              />
+            </div>
           </div>
-          <div className="live-metric">
-            <span className="label">Errors</span>
-            <span className={`value ${metrics.errors > 0 ? 'has-errors' : ''}`}>
-              <AlertTriangle size={14} /> {metrics.errors}
-            </span>
-          </div>
-          <div className="live-metric">
-            <span className="label">Loss</span>
-            <span className={`value ${metrics.loss > 0 ? 'has-errors' : ''}`}>
-              <AlertTriangle size={14} /> {metrics.loss}
-            </span>
-          </div>
-        </div>
+        </>
       )}
-      
+
       <div className="terminal-window">
         {logs.map((log, i) => (
           <div key={i} className={`terminal-line ${log.includes('ERROR') || log.includes('CRITICAL') ? 'text-red' : log.includes('WARNING') ? 'text-yellow' : log.includes('OK') ? 'text-green' : ''}`}>
