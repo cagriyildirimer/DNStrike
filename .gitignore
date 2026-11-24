@@ -9,3 +9,4 @@
 *.tsbuildinfo
 /web/vite.config.js
 /web/vite.config.d.ts
+.dnstrike-api-key.txt
