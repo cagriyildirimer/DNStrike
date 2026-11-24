@@ -13,7 +13,7 @@ async function request<T>(path:string, init?:RequestInit, notifyUnauthorized=tru
 }
 export const api={
   session:()=>request<{authenticated:boolean}>('/api/auth/session',undefined,false),
-  login:(apiKey:string)=>request<{authenticated:boolean;expires_at:string}>('/api/auth/session',{method:'POST',body:JSON.stringify({api_key:apiKey})},false),
+  login:(username:string,password:string)=>request<{authenticated:boolean;expires_at:string}>('/api/auth/session',{method:'POST',body:JSON.stringify({username,password})},false),
   logout:()=>request<void>('/api/auth/session',{method:'DELETE'}),
   listTargets:()=>request<Target[]>('/api/targets'),
   createTarget:(input:TargetInput)=>request<Target>('/api/targets',{method:'POST',body:JSON.stringify(input)}),

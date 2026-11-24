@@ -18,26 +18,55 @@ const (
 	apiKeyMinLength = 32
 	sessionCookie   = "dnstrike_session"
 	sessionTTL      = 8 * time.Hour
+
+	// Fixed workspace credentials. This is a local lab tool; the login is a
+	// convenience gate, not a hardened authentication system. Do not expose the
+	// server to untrusted networks with these defaults.
+	fixedUsername = "admin"
+	fixedPassword = "admin"
 )
 
 type authenticator struct {
-	keyHash    [sha256.Size]byte
-	signingKey []byte
-	now        func() time.Time
+	keyHash          [sha256.Size]byte
+	apiKeyConfigured bool
+	signingKey       []byte
+	now              func() time.Time
 }
 
+// newAuthenticator builds the session authenticator. The API key is optional: a
+// non-empty key must be at least 32 characters and additionally enables
+// programmatic Bearer / X-DNStrike-API-Key access, while an empty key leaves the
+// username/password session login as the only way in.
 func newAuthenticator(apiKey string) (*authenticator, error) {
-	if len(apiKey) < apiKeyMinLength {
+	apiKeyConfigured := apiKey != ""
+	if apiKeyConfigured && len(apiKey) < apiKeyMinLength {
 		return nil, errors.New("DNSTRIKE_API_KEY must contain at least 32 characters")
 	}
-	keyHash := sha256.Sum256([]byte(apiKey))
-	signingKey := hmac.New(sha256.New, []byte(apiKey))
+
+	seed := apiKey
+	if !apiKeyConfigured {
+		seed = "dnstrike-default-session-seed"
+	}
+	signingKey := hmac.New(sha256.New, []byte(seed))
 	_, _ = signingKey.Write([]byte("dnstrike-session-signing-key"))
-	return &authenticator{
-		keyHash:    keyHash,
-		signingKey: signingKey.Sum(nil),
-		now:        time.Now,
-	}, nil
+
+	a := &authenticator{
+		apiKeyConfigured: apiKeyConfigured,
+		signingKey:       signingKey.Sum(nil),
+		now:              time.Now,
+	}
+	if apiKeyConfigured {
+		a.keyHash = sha256.Sum256([]byte(apiKey))
+	}
+	return a, nil
+}
+
+// validCredentials checks the submitted workspace username/password against the
+// fixed credentials in constant time.
+func validCredentials(username, password string) bool {
+	u := subtle.ConstantTimeCompare([]byte(username), []byte(fixedUsername))
+	p := subtle.ConstantTimeCompare([]byte(password), []byte(fixedPassword))
+	return u == 1 && p == 1
 }
 
 func (a *authenticator) require() gin.HandlerFunc {
@@ -55,12 +84,14 @@ func (a *authenticator) require() gin.HandlerFunc {
 }
 
 func (a *authenticator) authorized(r *http.Request) bool {
-	if key := strings.TrimSpace(r.Header.Get("X-DNStrike-API-Key")); key != "" && a.validAPIKey(key) {
-		return true
-	}
-	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
-		if key := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")); key != "" && a.validAPIKey(key) {
+	if a.apiKeyConfigured {
+		if key := strings.TrimSpace(r.Header.Get("X-DNStrike-API-Key")); key != "" && a.validAPIKey(key) {
 			return true
+		}
+		if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+			if key := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")); key != "" && a.validAPIKey(key) {
+				return true
+			}
 		}
 	}
 	cookie, err := r.Cookie(sessionCookie)
@@ -68,6 +99,9 @@ func (a *authenticator) authorized(r *http.Request) bool {
 }
 
 func (a *authenticator) validAPIKey(candidate string) bool {
+	if !a.apiKeyConfigured {
+		return false
+	}
 	candidateHash := sha256.Sum256([]byte(candidate))
 	return subtle.ConstantTimeCompare(candidateHash[:], a.keyHash[:]) == 1
 }
@@ -75,12 +109,13 @@ func (a *authenticator) validAPIKey(candidate string) bool {
 func (a *authenticator) createSession(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	var input struct {
-		APIKey string `json:"api_key"`
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
-	if err := c.ShouldBindJSON(&input); err != nil || !a.validAPIKey(input.APIKey) {
+	if err := c.ShouldBindJSON(&input); err != nil || !validCredentials(input.Username, input.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
 			"code":    "INVALID_CREDENTIALS",
-			"message": "API anahtarı geçersiz.",
+			"message": "Kullanıcı adı veya şifre geçersiz.",
 		}})
 		return
 	}

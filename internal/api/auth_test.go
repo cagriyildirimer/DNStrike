@@ -57,7 +57,7 @@ func TestAPIKeyHeadersAuthorizeRequests(t *testing.T) {
 func TestLoginCreatesAuthenticatedSession(t *testing.T) {
 	router := testRouter(t)
 	login := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"api_key":"`+testAPIKey+`"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"username":"admin","password":"admin"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(login, request)
 	if login.Code != http.StatusOK {
@@ -77,10 +77,10 @@ func TestLoginCreatesAuthenticatedSession(t *testing.T) {
 	}
 }
 
-func TestLoginRejectsInvalidKey(t *testing.T) {
+func TestLoginRejectsInvalidCredentials(t *testing.T) {
 	router := testRouter(t)
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"api_key":"wrong"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"username":"admin","password":"wrong"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
