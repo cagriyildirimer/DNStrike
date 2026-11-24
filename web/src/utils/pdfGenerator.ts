@@ -1,6 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import type { TestRun } from '../types';
+import { interpretReport, severityPdf } from './reportInsights';
 
 type JsPDFWithAutoTable = jsPDF & { lastAutoTable: { finalY: number } };
 
@@ -74,161 +75,50 @@ export function generatePdfReport(test: TestRun) {
   doc.text('2. Executive Summary & Findings', 15, currentY);
   currentY += 6;
 
-  let alertBg = [240, 253, 244]; // green light
-  let alertBorder = [34, 197, 94];
-  let alertTitleColor = [21, 128, 61];
-  let alertTextColor = [20, 83, 45];
-  let alertTitle = 'SECURE CONFIGURATION';
-  let alertText = 'The DNS infrastructure correctly refused unauthorized recursion and zone transfers. The configuration follows security best practices.';
+  // The assessment (title / severity / summary / impact / recommendation) comes
+  // from the shared interpretReport helper so the PDF and the on-screen report
+  // always tell the same story and every scenario is covered.
+  const insight = interpretReport(test);
+  const palette = severityPdf[insight.severity];
+  const alertTitle = `${palette.label} — ${insight.title}`;
 
-  if (test.scenario === 'rrl-threshold') {
-    const rateLimitActive = Boolean(test.result?.rate_limit_active);
-    const slipActive = Boolean(test.result?.slip_fallback_active);
-    const thresholdQPS = Number(test.result?.detected_threshold_qps ?? 0);
-    if (!rateLimitActive) {
-      alertBg = [255, 251, 235];
-      alertBorder = [245, 158, 11];
-      alertTitleColor = [180, 83, 9];
-      alertTextColor = [146, 64, 14];
-      alertTitle = 'WARNING (NO RRL RATE LIMITING ENFORCED)';
-      alertText = 'The DNS server processed peak 500 QPS UDP bursts without enforcing Response Rate Limiting (RRL). The server is at risk of reflector DDoS participation.';
-    } else {
-      alertTitle = slipActive ? 'EXCELLENT RRL & SLIP POSTURE' : 'GOOD RRL POSTURE (STRICT DROP)';
-      alertText = `Response Rate Limiting triggered at ${thresholdQPS} QPS. ${slipActive ? 'SLIP TCP Fallback (TC=1) is active to allow legitimate resolvers to fallback to TCP.' : 'Strict UDP packet drop is active.'}`;
-    }
-  } else if (test.scenario === 'subdomain-takeover') {
-    const vulnCount = Number(test.result?.vulnerable_count ?? 0);
-    if (vulnCount > 0) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'HIGH RISK (SUBDOMAINS VULNERABLE TO TAKEOVER)';
-      alertText = `Found ${vulnCount} dangling CNAME records pointing to decommissioned cloud providers (AWS, GitHub Pages, Heroku, Azure). Immediate action required: remove orphaned CNAMEs or claim backend resources.`;
-    } else {
-      alertTitle = 'NO DANGLING CNAMEs DETECTED';
-      alertText = 'All scanned CNAME records resolve safely to active backend targets. No subdomain takeover vectors detected.';
-    }
-  } else if (test.scenario === 'dns-fuzzing') {
-    if (test.result?.target_crashed === true) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'CRITICAL VULNERABILITY (SERVER PROCESS CRASH)';
-      alertText = 'The DNS server crashed or froze during malformed packet fuzzing vectors. Upgrade DNS software and enforce strict UDP packet parsing checks.';
-    } else {
-      alertTitle = 'EXCELLENT FUZZING RESILIENCE';
-      alertText = 'The DNS server successfully handled malformed packet vectors without process crashes or service degradation.';
-    }
-  } else if (test.scenario === 'zone-transfer-audit') {
-    const leaked = Number(test.result?.total_leaked_records ?? 0);
-    if (leaked > 0) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'CRITICAL ZONE TRANSFER LEAK DETECTED';
-      alertText = `The DNS server permitted an unauthorized AXFR full zone transfer and siphoned ${leaked} domain records. Disable AXFR globally or restrict transfers exclusively to secondary nameserver IPs.`;
-    } else {
-      alertTitle = 'SECURE ZONE TRANSFER POSTURE';
-      alertText = 'The DNS server correctly refused unauthorized AXFR zone transfer requests. Domain record database remains protected.';
-    }
-  } else if (test.scenario === 'dns-tunneling') {
-    const delivered = Number(test.result?.delivered_chunks ?? 0);
-    if (delivered > 0) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'HIGH VULNERABILITY (COVERT TUNNELING PASSED)';
-      alertText = `Transmitted ${delivered} hex-encoded covert payload chunks through DNS queries without DLP or firewall blocking. Enforce DNS query length limits and entropy inspection.`;
-    } else {
-      alertTitle = 'COVERT TUNNELING BLOCKED';
-      alertText = 'Target network security successfully blocked or refused high-entropy covert data tunneling queries.';
-    }
-  } else if (test.scenario === 'water-torture') {
-    const nxdomainCount = Number(test.result?.nxdomain_count ?? 0);
-    alertTitle = 'WATER TORTURE (NXDOMAIN FLOOD) COMPLETE';
-    alertText = `Executed random subdomain flood generating ${nxdomainCount} NXDOMAIN responses. Analyzed resolver negative cache resilience and authoritative server isolation.`;
-  } else if (test.scenario === 'ecs-manipulation') {
-    const ecsSupported = Boolean(test.result?.ecs_supported);
-    alertTitle = ecsSupported ? 'ECS OPTION SUPPORTED' : 'ECS OPTION STRIPPED / PRIVACY PROTECTED';
-    alertText = ecsSupported ? 'Target DNS server processed EDNS0 Client Subnet options across regional subnets.' : 'Target DNS server stripped or ignored ECS client subnets to enforce privacy.';
-  } else if (test.scenario === 'dnssec-audit') {
-    const dnskey = Boolean(test.result?.dnskey_present);
-    alertTitle = dnskey ? 'DNSSEC ACTIVE & SIGNED' : 'NOTICE (DNSSEC NOT SIGNED)';
-    alertText = dnskey ? 'Target domain returned valid DNSKEY records and RRSIG cryptographic signatures.' : 'Target domain is not signed with DNSSEC (No DNSKEY/DS records returned).';
-  } else if (test.scenario === 'tcp-slowloris') {
-    if (test.result?.legitimate_tcp_served === false) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'HIGH VULNERABILITY (TCP DoS DETECTED)';
-      alertText = 'The DNS server failed to serve legitimate TCP queries while TCP sockets were held open. The server lacks TCP socket connection pooling or idle timeout protection.';
-    } else {
-      alertTitle = 'EXCELLENT TCP RESILIENCE';
-      alertText = 'The DNS server successfully served legitimate TCP queries under socket exhaustion pressure.';
-    }
-  } else if (test.scenario === 'security-audit') {
-    if (score < 50) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'CRITICAL VULNERABILITY DETECTED';
-      alertText = 'The DNS server is severely misconfigured. Open Recursion or Zone Transfer (AXFR) vulnerabilities were found. Immediate remediation is required: Restrict recursion to trusted networks only and disable AXFR transfers globally.';
-    } else if (score < 90) {
-      alertBg = [255, 251, 235];
-      alertBorder = [245, 158, 11];
-      alertTitleColor = [180, 83, 9];
-      alertTextColor = [146, 64, 14];
-      alertTitle = 'SECURITY WARNING';
-      alertText = 'Some potential misconfigurations or information leaks were detected. Review specific findings to ensure sensitive records (like ANY queries) are protected.';
-    }
-  } else {
-    const loss = test.result?.loss !== undefined ? Number(test.result.loss) : 0;
-    if (loss > 0) {
-      alertBg = [254, 242, 242];
-      alertBorder = [239, 68, 68];
-      alertTitleColor = [185, 28, 28];
-      alertTextColor = [127, 29, 29];
-      alertTitle = 'CAPACITY EXCEEDED (PACKET LOSS)';
-      alertText = `The server failed to respond to all queries. A loss rate of ${loss} was detected. Packet loss indicates UDP packet drops due to resource exhaustion or rate-limiting.`;
-    } else if (score < 100) {
-      alertBg = [255, 251, 235];
-      alertBorder = [245, 158, 11];
-      alertTitleColor = [180, 83, 9];
-      alertTextColor = [146, 64, 14];
-      alertTitle = 'HIGH LATENCY DETECTED';
-      alertText = 'The server processed requests, but response times degraded significantly under load, leading to slower resolution times during traffic spikes.';
-    } else {
-      alertTitle = 'EXCELLENT RESILIENCE';
-      alertText = 'The infrastructure handled the requested Queries Per Second (QPS) flawlessly with zero packet loss and optimal latency.';
-    }
+  const boxWidth = pageWidth - 30;
+  const textWidth = boxWidth - 10;
+  const summaryLines = doc.splitTextToSize(insight.summary, textWidth);
+  const impactLines = doc.splitTextToSize(`Impact: ${insight.impact}`, textWidth);
+  const recommendationLines = doc.splitTextToSize(`Recommendation: ${insight.recommendation}`, textWidth);
+  const bodyLineCount = summaryLines.length + impactLines.length + recommendationLines.length;
+  // title row + spacing between the three blocks + line heights
+  const boxHeight = 10 + bodyLineCount * 4.3 + 6;
+
+  // Page-break guard so the whole assessment box stays together.
+  if (currentY + boxHeight > 275) {
+    doc.addPage();
+    currentY = 15;
   }
 
-  // Draw Alert Box
-  const boxWidth = pageWidth - 30;
-  const splitText = doc.splitTextToSize(alertText, boxWidth - 10);
-  const boxHeight = 12 + (splitText.length * 4.5);
-
-  doc.setFillColor(alertBg[0], alertBg[1], alertBg[2]);
+  doc.setFillColor(palette.bg[0], palette.bg[1], palette.bg[2]);
   doc.rect(15, currentY, boxWidth, boxHeight, 'F');
-  
-  doc.setFillColor(alertBorder[0], alertBorder[1], alertBorder[2]);
+
+  doc.setFillColor(palette.border[0], palette.border[1], palette.border[2]);
   doc.rect(15, currentY, 2, boxHeight, 'F');
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
-  doc.setTextColor(alertTitleColor[0], alertTitleColor[1], alertTitleColor[2]);
+  doc.setTextColor(palette.title[0], palette.title[1], palette.title[2]);
   doc.text(alertTitle, 20, currentY + 6);
 
+  let textY = currentY + 12;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.setTextColor(alertTextColor[0], alertTextColor[1], alertTextColor[2]);
-  doc.text(splitText, 20, currentY + 11);
+  doc.setTextColor(palette.text[0], palette.text[1], palette.text[2]);
+  doc.text(summaryLines, 20, textY);
+  textY += summaryLines.length * 4.3 + 1.5;
+
+  doc.setFont('helvetica', 'bold');
+  doc.text(impactLines, 20, textY);
+  textY += impactLines.length * 4.3 + 1.5;
+  doc.text(recommendationLines, 20, textY);
 
   currentY += boxHeight + 10;
 

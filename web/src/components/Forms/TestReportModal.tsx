@@ -1,6 +1,14 @@
 import { useState } from 'react';
-import { X, ShieldAlert, CheckCircle2, XCircle, Clock, Zap, Download } from 'lucide-react';
+import { X, ShieldAlert, CheckCircle2, XCircle, Clock, Zap, Download, Info, Lightbulb } from 'lucide-react';
 import type { TestRun } from '../../types';
+import { interpretReport, severityUi, type InsightSeverity } from '../../utils/reportInsights';
+
+const severityIcon: Record<InsightSeverity, typeof ShieldAlert> = {
+  secure: CheckCircle2,
+  info: Info,
+  warning: ShieldAlert,
+  critical: XCircle,
+};
 
 interface TestReportModalProps {
   test: TestRun;
@@ -11,7 +19,10 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const isFailed = test.status === 'FAILED';
   const score = test.resilience_score ?? 0;
-  
+  const insight = interpretReport(test);
+  const sev = severityUi[insight.severity];
+  const InsightIcon = severityIcon[insight.severity];
+
   let scoreColor = 'var(--text-muted)';
   let ScoreIcon = ShieldAlert;
   if (test.status === 'COMPLETED') {
@@ -78,6 +89,42 @@ export function TestReportModal({ test, close }: TestReportModalProps) {
               <span className="val" style={{ color: scoreColor, fontSize: '2rem' }}>
                 {test.status === 'COMPLETED' ? `${score}/100` : 'N/A'}
               </span>
+            </div>
+          </div>
+
+          <div style={{
+            background: sev.bg,
+            border: `1px solid ${sev.border}`,
+            borderLeft: `3px solid ${sev.color}`,
+            borderRadius: 'var(--radius-sm)',
+            padding: '1.25rem 1.5rem',
+            marginBottom: '2.5rem',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.6rem' }}>
+              <InsightIcon size={18} style={{ color: sev.color, flexShrink: 0 }} />
+              <span style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.05em', color: sev.color, padding: '0.15rem 0.5rem', border: `1px solid ${sev.border}`, borderRadius: '999px' }}>
+                {sev.label}
+              </span>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                {insight.title}
+              </h3>
+            </div>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.5, margin: '0 0 0.85rem' }}>
+              {insight.summary}
+            </p>
+            <div style={{ display: 'grid', gap: '0.6rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <ShieldAlert size={15} style={{ color: 'var(--text-muted)', flexShrink: 0, marginTop: '0.15rem' }} />
+                <p style={{ margin: 0, fontSize: '0.85rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Impact: </span>{insight.impact}
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <Lightbulb size={15} style={{ color: 'var(--text-muted)', flexShrink: 0, marginTop: '0.15rem' }} />
+                <p style={{ margin: 0, fontSize: '0.85rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Recommendation: </span>{insight.recommendation}
+                </p>
+              </div>
             </div>
           </div>
 
