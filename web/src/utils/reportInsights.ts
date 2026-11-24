@@ -403,10 +403,69 @@ export function interpretReport(test: TestRun): ReportInsight {
       };
     }
 
+    case 'water-torture': {
+      const nxdomain = num(r.nxdomain_count);
+      const timeouts = num(r.timeouts);
+      if (score <= 40) {
+        return {
+          title: 'Buckled under subdomain flood',
+          severity: 'critical',
+          summary: `A high error/drop rate was seen while flooding random subdomains (${nxdomain} NXDOMAIN, ${timeouts} timeouts).`,
+          impact: 'A water-torture flood of random names can exhaust the resolver and the authoritative servers it queries, degrading or denying service for everyone.',
+          recommendation: 'Add rate limiting and aggressive negative caching, and isolate recursion so random-subdomain floods cannot overwhelm upstream authoritatives.',
+        };
+      }
+      if (score < 100) {
+        return {
+          title: 'Upstream pressure under flood',
+          severity: 'warning',
+          summary: `The server absorbed the flood but ${nxdomain} queries reached NXDOMAIN, so cache misses are chasing upstream authoritatives.`,
+          impact: 'Sustained random-subdomain floods push load onto authoritative servers and can slow legitimate resolution.',
+          recommendation: 'Tune negative (NXDOMAIN) caching and consider rate limiting random-subdomain query patterns.',
+        };
+      }
+      return {
+        title: 'Resisted subdomain flood',
+        severity: 'secure',
+        summary: 'The server stayed bounded under the random-subdomain flood with a low error rate.',
+        impact: 'Water-torture flooding does not readily degrade this server.',
+        recommendation: 'Keep negative caching and rate limiting in place.',
+      };
+    }
+
+    case 'qps-ramp': {
+      const maxQps = num(r.max_qps_reached);
+      if (score >= 90) {
+        return {
+          title: `Sustained ${maxQps} QPS`,
+          severity: 'secure',
+          summary: `The server handled the full ramp, staying stable up to ${maxQps} QPS.`,
+          impact: 'Capacity headroom is sufficient across the tested rate range.',
+          recommendation: 'Raise the ceiling (max QPS / step) to find the true breaking point.',
+        };
+      }
+      if (score >= 50) {
+        return {
+          title: `Stable to ~${maxQps} QPS`,
+          severity: 'warning',
+          summary: `The server became unstable above ~${maxQps} QPS before reaching the target ceiling.`,
+          impact: 'Beyond this rate responses degrade or drop — the practical capacity limit under burst.',
+          recommendation: 'Plan capacity below this threshold, or scale/tune the resolver before expected peaks.',
+        };
+      }
+      return {
+        title: `Low capacity (~${maxQps} QPS)`,
+        severity: 'critical',
+        summary: `The server degraded at a low query rate (~${maxQps} QPS).`,
+        impact: 'A modest query burst is enough to degrade service, making the server easy to overwhelm.',
+        recommendation: 'Investigate resource limits and rate-limiter settings; scale capacity before production load.',
+      };
+    }
+
     default: {
-      // Performance / volume scenarios (benchmark, qps-ramp, query-flood,
-      // nxdomain, random-subdomain, water-torture, ...) are judged on loss and
-      // latency rather than a security posture.
+      // Pure performance scenarios (benchmark, query-flood, nxdomain,
+      // random-subdomain) are judged on loss and latency rather than a security
+      // posture. Their result maps always carry loss and p99_latency_ms.
       const loss = num(r.loss);
       const p99 = has(r.p99_latency_ms) ? num(r.p99_latency_ms) : undefined;
       if (loss > 0) {
